@@ -36,5 +36,9 @@
   ],
   "product4_runtime_files": [
     "__init__.py"
-  ]
+  ],
+  "python_entrypoint": {
+    "file": "pyproject.toml",
+    "value": "api.index:app"
+  }
 }

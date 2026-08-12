@@ -1,0 +1,13 @@
+[project]
+name = "autoglific"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.117.1,<1",
+  "psycopg[binary]>=3.2,<4",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.5,<3",
+]
+
+[tool.vercel]
+entrypoint = "api.index:app"

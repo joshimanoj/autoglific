@@ -67,11 +67,12 @@ python -m pip install -r requirements.txt "uvicorn>=0.35,<1"
 python -m uvicorn api.index:app --host 127.0.0.1 --port 8000
 ```
 
-This bundle is an application bundle, not an editable Python package: it has
-no `pyproject.toml`, `setup.py`, or top-level `workbench/` package. Run the
-ASGI command from the bundle root so `api/` and `product4/` resolve. Use a new
-disposable `PRODUCT4_WORKBENCH_DATA` directory for isolated work. Vercel runs
-the same `api.index:app` entrypoint.
+This bundle is an application bundle, not an editable Python package: the root
+`pyproject.toml` declares the same bounded runtime dependencies for Vercel and
+the bundle has no top-level `workbench/` package. Run the ASGI command from the bundle root so
+`api/` and `product4/` resolve. Use a new disposable
+`PRODUCT4_WORKBENCH_DATA` directory for isolated work. Vercel resolves the
+same `api.index:app` entrypoint from `pyproject.toml`.
 
 ## Server-side configuration
 
@@ -96,9 +97,10 @@ not include the test suite or evidence artifacts.
 
 ## Vercel and Neon overview
 
-The included `vercel.json` routes `/api/*` and the UI to the same FastAPI
-entrypoint and sets the function ceiling used by the publish-lease design. A
-hosted setup should use a clean preview Neon database or branch, apply
+The `pyproject.toml` entrypoint sends `/api/*` and the UI to the same FastAPI
+application. Vercel's default Python function duration is 300 seconds, which
+is the function ceiling used by the publish-lease design. A hosted setup should
+use a clean preview Neon database or branch, apply
 `migrations/001_workbench.sql` idempotently, set `DATABASE_URL` as a server-side
 Vercel variable, and keep the preview protected. The optional publish route
 must be reviewed separately from deployment verification.
