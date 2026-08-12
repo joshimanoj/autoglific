@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -25,6 +26,8 @@ if str(AUTOBUILDER_ROOT) not in sys.path:
 from product4.authoring.brief_translation import (
     IncrementalSemanticModelClient,
     SemanticTranslationError,
+    safe_validation_fingerprint,
+    safe_network_subtype,
 )
 from product4.authoring.freeze import freeze, prepare_confirmation
 from product4.authoring.interpreter import RegistryInterpreter
@@ -69,6 +72,9 @@ GLIFIC_RESULTS_ROOT = DATA_ROOT / "glific-publishes"
 # safety margin.  Expiry therefore recovers at 420 seconds, while an old owner
 # cannot record a result after the lease has expired.
 PUBLISH_LEASE_SECONDS = 420
+_REQUEST_ID_RE = re.compile(r"^REQ-[A-F0-9]{12}$")
+_BRANCH_LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,200}$")
+_LOGGER = logging.getLogger("product4.autoglific")
 
 
 def _assert_non_evidence_path(path: Path) -> None:
@@ -85,11 +91,64 @@ if not os.environ.get("DATABASE_URL", "").strip():
 
 
 class ApiError(Exception):
-    def __init__(self, code: str, message: str, status: int = HTTPStatus.BAD_REQUEST):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        status: int = HTTPStatus.BAD_REQUEST,
+        *,
+        request_id: str | None = None,
+        validation_fingerprint: str | None = None,
+        network_subtype: str | None = None,
+        available_branches: list[str] | tuple[str, ...] | None = None,
+    ):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status = status
+        self.request_id = request_id if _REQUEST_ID_RE.fullmatch(str(request_id or "")) else _new_request_id()
+        self.validation_fingerprint = safe_validation_fingerprint(validation_fingerprint)
+        self.network_subtype = safe_network_subtype(network_subtype)
+        self.available_branches = _safe_branch_labels(available_branches)
+
+
+def _new_request_id() -> str:
+    return f"REQ-{uuid.uuid4().hex[:12].upper()}"
+
+
+def _safe_branch_labels(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result: list[str] = []
+    for item in value[:10]:
+        if not isinstance(item, str):
+            continue
+        label = item.strip()
+        if not label or not _BRANCH_LABEL_RE.fullmatch(label) or label in result:
+            continue
+        result.append(label)
+    return tuple(result)
+
+
+def _open_branch_labels(session: AuthoringSession) -> tuple[str, ...]:
+    """Expose only current authored branch labels for an ambiguity prompt."""
+
+    try:
+        context = AuthoringService._authoring_context(session)
+    except Exception:
+        return ()
+    labels: list[str] = []
+    for branch in context.get("open_branches", []):
+        raw_labels = branch.get("labels") if isinstance(branch, dict) else None
+        if not isinstance(raw_labels, list):
+            continue
+        label = " / ".join(
+            item.strip()
+            for item in raw_labels
+            if isinstance(item, str) and item.strip()
+        ) or "Main flow"
+        labels.extend([label])
+    return _safe_branch_labels(labels)
 
 
 def _safe_session_id(value: Any) -> str:
@@ -170,9 +229,9 @@ def _load_json(path: Path) -> dict[str, Any]:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ApiError("P4_NOT_FOUND", "Workbench resource not found.", HTTPStatus.NOT_FOUND) from exc
+        raise ApiError("P4_NOT_FOUND", "AutoGlific resource not found.", HTTPStatus.NOT_FOUND) from exc
     except (OSError, ValueError) as exc:
-        raise ApiError("P4_WORKBENCH_ARTIFACT_INVALID", "Stored workbench JSON is invalid.", HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+        raise ApiError("P4_WORKBENCH_ARTIFACT_INVALID", "Stored AutoGlific data is invalid.", HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
 
 def _error_code(exc: Exception) -> str:
@@ -187,6 +246,58 @@ def _error_code(exc: Exception) -> str:
 def _error_message(exc: Exception) -> str:
     message = str(exc)
     return message or exc.__class__.__name__
+
+
+def _api_error_from_exception(
+    exc: Exception,
+    *,
+    status: int = HTTPStatus.BAD_REQUEST,
+) -> ApiError:
+    return ApiError(
+        _error_code(exc),
+        _error_message(exc),
+        status,
+        request_id=getattr(exc, "request_id", None),
+        validation_fingerprint=getattr(exc, "validation_fingerprint", None),
+        network_subtype=getattr(exc, "network_subtype", None),
+    )
+
+
+def _safe_error_message(error: ApiError) -> str:
+    """Return a public message without provider details or exception text."""
+
+    code = error.code
+    if code == "P4_SEMANTIC_CONFIGURATION_MISSING":
+        return "AutoGlific semantic setup is unavailable."
+    if code in {
+        "P4_SEMANTIC_AUTHENTICATION_FAILED",
+        "P4_SEMANTIC_PROJECT_ACCESS_FAILED",
+        "P4_SEMANTIC_MODEL_UNAVAILABLE",
+        "P4_SEMANTIC_QUOTA_EXCEEDED",
+        "P4_SEMANTIC_RATE_LIMITED",
+        "P4_SEMANTIC_NETWORK_FAILURE",
+        "P4_SEMANTIC_PROVIDER_UNAVAILABLE",
+        "P4_SEMANTIC_PROVIDER_FAILURE",
+    }:
+        return "AutoGlific could not reach its semantic service."
+    if code in {
+        "P4_SEMANTIC_PROVIDER_RESPONSE_INVALID",
+        "P4_SEMANTIC_PROVIDER_RESPONSE_EMPTY",
+    }:
+        return "AutoGlific received an unreadable semantic response."
+    if code == "P4_TRANSLATION_AMBIGUOUS":
+        return "AutoGlific could not determine the intended branch."
+    if code == "P4_TRANSLATION_TRIGGER_ONLY":
+        return "AutoGlific needs an authored flow action for that trigger."
+    if code == "P4_TRANSLATION_CHOICE_SOURCE_MISMATCH":
+        return "AutoGlific could not validate the choice options."
+    if code == "P4_TRANSLATION_SEGMENT_NON_LINEAR_MIDPOINT":
+        return "AutoGlific created branches from that choice."
+    if code.startswith("P4_TRANSLATION_"):
+        return "AutoGlific could not validate that instruction."
+    if code.startswith("P4_WORKBENCH_"):
+        return "AutoGlific could not complete that action."
+    return error.message
 
 
 class _UnavailableSemanticModelClient:
@@ -605,7 +716,10 @@ class WorkbenchApp:
             try:
                 updated = self.service.propose(session, statement.strip())
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc)) from exc
+                error = _api_error_from_exception(exc)
+                if error.code == "P4_TRANSLATION_AMBIGUOUS":
+                    error.available_branches = _open_branch_labels(session)
+                raise error from exc
             self._save(updated, before)
             return self.view(updated)
 
@@ -617,7 +731,7 @@ class WorkbenchApp:
             raise ApiError("P4_UNKNOWN_QUESTION", "Question is not pending.")
         decision_source = body.get("decision_source", "confirmed_user_decision")
         if decision_source != "confirmed_user_decision":
-            raise ApiError("P4_EVALUATION_DECISION_NOT_ALLOWED", "Workbench answers must be confirmed user decisions.")
+            raise ApiError("P4_EVALUATION_DECISION_NOT_ALLOWED", "AutoGlific answers must be confirmed user decisions.")
         value = body.get("value")
         if question.answer_type == "boolean" and not isinstance(value, bool):
             raise ApiError("P4_BOOLEAN_ANSWER_INVALID", "Answer must be true or false.")
@@ -660,7 +774,7 @@ class WorkbenchApp:
             try:
                 updated = self.service.answer(session, answer)
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc)) from exc
+                raise _api_error_from_exception(exc) from exc
             self._save(updated, before)
             return self.view(updated)
 
@@ -672,7 +786,7 @@ class WorkbenchApp:
             try:
                 package, digest = prepare_confirmation(session, confirmed_by="workbench-user")
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc)) from exc
+                raise _api_error_from_exception(exc) from exc
             try:
                 self.storage.save_document(
                     session_id,
@@ -716,7 +830,7 @@ class WorkbenchApp:
                     raise ValueError("P4_CONFIRMATION_PACKAGE_HASH_MISMATCH")
                 updated = freeze(session, confirmed_hash, prepared["package"])
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc)) from exc
+                raise _api_error_from_exception(exc) from exc
             self._save(updated, session.revision)
             try:
                 self.storage.delete_document(
@@ -775,7 +889,7 @@ class WorkbenchApp:
             try:
                 result = run_pipeline(session)
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc)) from exc
+                raise _api_error_from_exception(exc) from exc
             self._replace_pipeline_and_invalidate_result(
                 session,
                 result,
@@ -861,7 +975,7 @@ class WorkbenchApp:
                     )
                 )
             except Exception as exc:
-                raise ApiError(_error_code(exc), _error_message(exc), HTTPStatus.BAD_GATEWAY) from exc
+                raise _api_error_from_exception(exc, status=HTTPStatus.BAD_GATEWAY) from exc
             with self._lock(session_id):
                 current = self._load_session(session_id)
                 if (
@@ -967,19 +1081,42 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         # Keep the local launch terminal quiet except for explicit failures.
         return
 
-    def _send_json(self, payload: Any, status: int = HTTPStatus.OK) -> None:
+    def _send_json(
+        self,
+        payload: Any,
+        status: int = HTTPStatus.OK,
+        *,
+        request_id: str | None = None,
+    ) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Cache-Control", "no-store")
+        if request_id:
+            self.send_header("X-AutoGlific-Request-ID", request_id)
         self.end_headers()
         self.wfile.write(raw)
 
     def _send_error(self, error: ApiError) -> None:
+        _LOGGER.warning(
+            "AutoGlific request failed code=%s request_id=%s validation=%s network=%s",
+            error.code,
+            error.request_id,
+            error.validation_fingerprint or "-",
+            error.network_subtype or "-",
+        )
+        detail = {
+            "code": error.code,
+            "message": _safe_error_message(error),
+            "request_id": error.request_id,
+        }
+        if error.available_branches:
+            detail["available_branches"] = list(error.available_branches)
         self._send_json(
-            {"error": {"code": error.code, "message": error.message}},
+            {"error": detail},
             error.status,
+            request_id=error.request_id,
         )
 
     def _body(self) -> dict[str, Any]:
@@ -1044,7 +1181,9 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:  # noqa: BLE001 - last-resort HTTP boundary
-            self._send_error(ApiError(_error_code(exc), _error_message(exc), HTTPStatus.INTERNAL_SERVER_ERROR))
+            self._send_error(
+                _api_error_from_exception(exc, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            )
 
     def _send_static(self, name: str, content_type: str) -> None:
         path = PROJECT_ROOT / "workbench" / "static" / name
@@ -1086,7 +1225,9 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         except ApiError as exc:
             self._send_error(exc)
         except Exception as exc:  # noqa: BLE001 - last-resort HTTP boundary
-            self._send_error(ApiError(_error_code(exc), _error_message(exc), HTTPStatus.INTERNAL_SERVER_ERROR))
+            self._send_error(
+                _api_error_from_exception(exc, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            )
 
 
 def build_server(

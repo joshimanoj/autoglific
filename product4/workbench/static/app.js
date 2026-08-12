@@ -7,12 +7,11 @@
   let settings = null;
   let sessionsLoading = false;
   let lastError = null;
-  let lastSuccess = null;
   let busy = false;
   let generating = false;
   let glificPublishing = false;
   let glificStatusPoller = null;
-  let workspaceMode = "authoring";
+  let workspaceMode = "landing";
   let processPanel = "publishing";
   let reviewPanel = "mermaid";
   let publishingPhase = null;
@@ -23,6 +22,7 @@
   let renderedQuestionKey = "";
   let clarificationRevealKey = "";
   let clarificationRevealGeneration = 0;
+  let threadRevealPending = false;
   let validationAutoAnswerKey = "";
   let toastTimer = null;
   let toastGeneration = 0;
@@ -37,7 +37,6 @@
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
-  const pretty = (value) => JSON.stringify(value, null, 2);
   const compactJson = (value) => JSON.stringify(value);
 
   const CAPABILITY_NAMES = {
@@ -113,7 +112,7 @@
   function friendlyQuestion(question) {
     const field = fieldName(question);
     if (field === "options") return { heading: "What choices should people see?", explanation: "Add the labels people should see." };
-    if (question?.contextual && question.prompt) return { heading: question.prompt, explanation: "Answer this detail to complete the step. The builder checks it against the flow rules." };
+    if (question?.contextual && question.prompt) return { heading: question.prompt, explanation: "" };
     const questions = {
       copy: ["What message should people receive for this step?", "Write the exact welcome or response that should appear in WhatsApp."],
       prompt: ["What question should people see for this step?", "Write the exact prompt that asks for the information."],
@@ -139,15 +138,15 @@
     P4_CONFIGURATION_INCOMPLETE: ["One detail is still missing.", "Complete the current clarification before continuing."],
     P4_OPTION_ANSWER_INVALID: ["Choose one of the available options.", "Select an answer, then continue."],
     P4_CHOICE_OPTIONS_ANSWER_INVALID: ["Each choice needs a clear label.", "Add at least two different choices, then continue."],
-    P4_INVALID_JSON_ANSWER: ["The answer could not be saved.", "Try the current flow again or ask the workbench owner to inspect the safe server error."],
+    P4_INVALID_JSON_ANSWER: ["The answer could not be saved.", "Try the current flow again. If it continues, share the AutoGlific reference with the owner."],
     P4_REVISION_CONFLICT: ["This flow changed in another tab.", "Open the latest saved version, then continue from the current question."],
     P4_NOT_READY_FOR_REVIEW: ["The flow is not ready to review yet.", "Finish every open branch and answer the remaining question."],
     P4_COMPILE_REQUIRES_FROZEN_SESSION: ["The approved flow needs to be frozen first.", "Return to Review flow and confirm it before running the pipeline."],
-    P4_GLIFIC_CONFIGURATION_MISSING: ["Glific publishing is not configured.", "Ask the workbench owner to set GLIFIC_PRODUCTION_BASE_URL, GLIFIC_PHONE, and GLIFIC_PASSWORD on the server."],
-    P4_GLIFIC_CONFIGURATION_INVALID: ["The Glific connection settings need attention.", "Ask the workbench owner to check the HTTPS tenant URL and server-side settings. No flow was reported as published."],
-    P4_GLIFIC_AUTHENTICATION_FAILED: ["Glific authentication failed.", "Ask the workbench owner to check the server-side phone and password. No flow was reported as published."],
+    P4_GLIFIC_CONFIGURATION_MISSING: ["Glific publishing is not configured.", "Ask the AutoGlific owner to set the server-side Glific connection settings."],
+    P4_GLIFIC_CONFIGURATION_INVALID: ["The Glific connection settings need attention.", "Ask the AutoGlific owner to check the HTTPS tenant URL and server-side settings. No flow was reported as published."],
+    P4_GLIFIC_AUTHENTICATION_FAILED: ["Glific authentication failed.", "Ask the AutoGlific owner to check the server-side phone and password. No flow was reported as published."],
     P4_GLIFIC_API_UNAVAILABLE: ["Glific could not be reached.", "Check the HTTPS tenant URL or network connection, then try again. No flow was reported as published."],
-    P4_GLIFIC_RESPONSE_INVALID: ["Glific returned an unexpected response.", "Ask the workbench owner to check the configured Glific API version, then try again."],
+    P4_GLIFIC_RESPONSE_INVALID: ["Glific returned an unexpected response.", "Ask the AutoGlific owner to check the configured Glific API version, then try again."],
     P4_GLIFIC_IMPORT_FAILED: ["Glific rejected the flow import.", "Review the compiled flow and Glific response, then try again. No publish success was reported."],
     P4_GLIFIC_FLOW_NAME_COLLISION: ["A Glific flow with this name already exists.", "Rename the new flow before publishing."],
     P4_GLIFIC_FLOW_IDENTITY_FAILED: ["Glific did not return the imported flow identity.", "The import cannot be treated as confirmed. Check the Glific account and try again."],
@@ -157,14 +156,47 @@
     P4_GLIFIC_ARTIFACT_NOT_AVAILABLE: ["The compiled Glific file is not available.", "Retry the pipeline before publication."],
     P4_GLIFIC_PUBLISH_IN_PROGRESS: ["A Glific publish is already in progress.", "Wait for the current request to finish before trying again."],
     P4_GLIFIC_LOCAL_STATE_CHANGED: ["The local flow changed during the Glific publish.", "Check Glific before retrying so you do not create a duplicate flow."],
-    P4_SEMANTIC_CONFIGURATION_MISSING: ["Semantic setup is not available yet.", "Ask the workbench owner to configure the local semantic connection, then retry."],
-    P4_SEMANTIC_PROVIDER_FAILURE: ["I could not understand that step right now.", "Check the local semantic connection, then try the same instruction again."],
+    P4_SEMANTIC_CONFIGURATION_MISSING: ["AutoGlific semantic setup is unavailable.", "Ask the AutoGlific owner to configure semantic authoring on the server, then retry."],
+    P4_SEMANTIC_AUTHENTICATION_FAILED: ["AutoGlific could not authenticate semantic authoring.", "Ask the AutoGlific owner to check the server-side semantic credentials, then retry."],
+    P4_SEMANTIC_PROJECT_ACCESS_FAILED: ["AutoGlific semantic project access was denied.", "Ask the AutoGlific owner to check the configured project access, then retry."],
+    P4_SEMANTIC_MODEL_UNAVAILABLE: ["AutoGlific’s semantic model is unavailable.", "Ask the AutoGlific owner to check the configured model, then retry."],
+    P4_SEMANTIC_QUOTA_EXCEEDED: ["AutoGlific semantic usage is over its quota.", "Ask the AutoGlific owner to check the provider quota before retrying."],
+    P4_SEMANTIC_RATE_LIMITED: ["AutoGlific semantic authoring is temporarily rate-limited.", "Wait a moment, then try the same instruction again."],
+    P4_SEMANTIC_NETWORK_FAILURE: ["AutoGlific could not reach semantic authoring.", "Check the server connection, then try the same instruction again."],
+    P4_SEMANTIC_PROVIDER_UNAVAILABLE: ["AutoGlific semantic authoring is temporarily unavailable.", "Wait a moment, then try the same instruction again."],
+    P4_SEMANTIC_PROVIDER_FAILURE: ["AutoGlific could not complete semantic authoring.", "Try the same instruction again. If it continues, share the AutoGlific reference with the owner."],
+    P4_SEMANTIC_PROVIDER_RESPONSE_INVALID: ["AutoGlific received an unreadable semantic response.", "Try the same instruction again. If it continues, share the AutoGlific reference with the owner."],
+    P4_SEMANTIC_PROVIDER_RESPONSE_EMPTY: ["AutoGlific received an empty semantic response.", "Try the same instruction again. If it continues, share the AutoGlific reference with the owner."],
+    P4_TRANSLATION_AMBIGUOUS: ["AutoGlific could not determine the intended branch.", "Choose one of the current open branches, then try the instruction again."],
+    P4_TRANSLATION_TRIGGER_ONLY: ["AutoGlific needs an authored flow action for that trigger.", "Add the first message or another flow action, then try again."],
+    P4_TRANSLATION_CHOICE_SOURCE_MISMATCH: ["AutoGlific could not validate the choice options.", "Try the same instruction again. If it continues, share the AutoGlific reference with the owner."],
+    P4_TRANSLATION_SEGMENT_NON_LINEAR_MIDPOINT: ["AutoGlific created branches from that choice.", "Add the choice first, then build the remaining steps separately in each branch."],
   };
 
   function friendlyError(error) {
     const code = error?.code || "P4_WORKBENCH_OPERATION_FAILED";
-    const known = ERROR_MESSAGES[code];
-    return { code, message: known ? known[0] : "Something needs your attention.", recovery: known ? known[1] : "Try the current action again, or open Advanced details for the safe technical report.", technical: String(error?.message || "") };
+    const branchOptions = Array.isArray(error?.available_branches)
+      ? [...new Set(error.available_branches.filter((item) => typeof item === "string" && item.trim()).slice(0, 10))]
+      : [];
+    let known = ERROR_MESSAGES[code]
+      || (code.startsWith("P4_TRANSLATION_")
+        ? ["AutoGlific could not validate that instruction.", "Try the same instruction again. If it continues, share the AutoGlific reference with the owner."]
+        : null);
+    if (code === "P4_TRANSLATION_AMBIGUOUS" && branchOptions.length) {
+      known = [
+        "AutoGlific could not match that branch.",
+        "Choose one of the current open branches: " + branchOptions.join(", ") + ".",
+      ];
+    }
+    const requestId = error?.request_id || error?.requestId || "";
+    const displayCode = code.replace(/^P4_WORKBENCH_/, "P4_AUTOGLIFIC_");
+    return {
+      code,
+      message: known ? known[0] : "AutoGlific could not complete that action.",
+      recovery: known ? known[1] : "Try the current action again. If it continues, share the AutoGlific reference with the owner.",
+      reference: requestId ? displayCode + " · " + requestId : displayCode,
+      technical: "",
+    };
   }
 
   function clearToastTimer() {
@@ -183,8 +215,8 @@
     }, TOAST_DURATION_MS);
   }
   function showToast(kind, value) {
-    if (kind === "error") { lastError = value; lastSuccess = null; }
-    else { lastSuccess = value; lastError = null; }
+    if (kind !== "error") return;
+    lastError = value;
     toastVisible = Boolean(value);
     if (toastVisible) armToastTimer();
     else clearToastTimer();
@@ -204,6 +236,8 @@
       const failure = new Error(detail.message || "Request failed.");
       failure.code = detail.code;
       failure.status = response.status;
+      failure.request_id = detail.request_id || response.headers.get("X-AutoGlific-Request-ID") || "";
+      failure.available_branches = Array.isArray(detail.available_branches) ? detail.available_branches : [];
       throw failure;
     }
     return payload;
@@ -221,19 +255,19 @@
     return pipeline?.all_stages_passed && stage?.status === "passed" && stage?.json ? stage : null;
   }
 
-  function apply(payload, success = null, revealClarification = false) {
+  function apply(payload, revealClarification = false) {
     state = payload;
+    if (workspaceMode === "landing" && payload?.session) workspaceMode = "authoring";
     lastError = null;
-    lastSuccess = null;
     toastVisible = false;
     clearToastTimer();
-    if (success) {
-      lastSuccess = success;
-      toastVisible = true;
-      armToastTimer();
+    if (revealClarification) {
+      queueClarificationReveal(payload);
+    } else {
+      clarificationRevealKey = "";
+      clarificationRevealGeneration += 1;
     }
-    if (revealClarification) queueClarificationReveal(payload);
-    else clarificationRevealKey = "";
+    threadRevealPending = Boolean(revealClarification);
     if (payload?.glific_publish || (payload?.pipeline && workspaceMode === "authoring")) {
       workspaceMode = "publishing";
       processPanel = "publishing";
@@ -253,10 +287,8 @@
   function renderAlerts() {
     const alerts = $("alerts");
     if (!alerts) return;
-    if (!toastVisible) { alerts.replaceChildren(); return; }
-    if (lastError) alerts.innerHTML = "<div class=\"alert error\" role=\"alert\"><strong>" + esc(lastError.message) + "</strong><span>" + esc(lastError.recovery) + "</span><button type=\"button\" class=\"alert-close\" aria-label=\"Dismiss notification\">×</button></div>";
-    else if (lastSuccess) alerts.innerHTML = "<div class=\"alert success\" role=\"status\"><span>" + esc(lastSuccess) + "</span><button type=\"button\" class=\"alert-close\" aria-label=\"Dismiss notification\">×</button></div>";
-    else alerts.replaceChildren();
+    if (!toastVisible || !lastError) { alerts.replaceChildren(); return; }
+    alerts.innerHTML = "<div class=\"alert error\" role=\"alert\"><strong>" + esc(lastError.message) + "</strong><span>" + esc(lastError.recovery) + "</span><small>Reference: " + esc(lastError.reference || lastError.code || "AutoGlific") + "</small><button type=\"button\" class=\"alert-close\" aria-label=\"Dismiss notification\">×</button></div>";
   }
 
   function sessionStatus(item) {
@@ -295,6 +327,9 @@
 
   function renderShell() {
     $("app").dataset.view = workspaceMode;
+    document.body.classList.toggle("landing-body", workspaceMode === "landing");
+    $("landing-view").classList.toggle("hidden", workspaceMode !== "landing");
+    $("workspace-view").classList.toggle("hidden", workspaceMode === "landing");
     $("authoring-view").classList.toggle("hidden", workspaceMode !== "authoring");
     $("review-view").classList.toggle("hidden", workspaceMode !== "review");
     $("process-view").classList.toggle("hidden", workspaceMode !== "publishing");
@@ -313,6 +348,10 @@
   }
   function answerSummary(record) {
     const field = String(record.field_path || "").replace(/^config\./, "");
+    if (field === "capability" || field === "semantic.capability") return "Flow step: " + capabilityName(record.value);
+    if (field === "statement" || field === "semantic.statement") return "Flow step: " + formatValue(record.value);
+    if (field === "branch_target") return "Branch: " + branchLabel([record.value]);
+    if (field === "flow.trigger_keywords") return "Starting words: " + formatValue(record.value);
     if (field === "input_type") return "Answer type: " + answerTypeLabel(record.value);
     if (field === "copy") return formatValue(record.value);
     if (field === "prompt") return "Question: " + formatValue(record.value);
@@ -321,9 +360,13 @@
     if (field === "save_as") return "Answer name: " + formatValue(record.value);
     if (field === "source_variable") return "Saved answer: " + formatValue(record.value);
     if (field === "field_name") return "Contact field: " + formatValue(record.value);
-    if (field === "capture_reference") return "Answer selected: " + formatValue(record.value);
+    if (field === "capture_reference") return "Answer selected: " + formatValue(labelForStableValue(record.value));
     if (field === "reason") return "Completion: " + formatValue(record.value);
     return (FIELD_NAMES[field] || "Answer") + ": " + formatValue(record.value);
+  }
+  function recordPrompt(record) {
+    if (record?.prompt) return String(record.prompt);
+    return friendlyQuestion({ field_path: record?.field_path, answer_type: record?.answer_type }).heading;
   }
   function nodeDisplay(node) {
     const config = node.config || {};
@@ -353,16 +396,15 @@
     if (!state) return [];
     const session = state.session;
     const turns = [];
-    const bySource = new Map();
     const nodeTurns = new Map();
+    let lastTurn = null;
     const addTurn = (text, activeProposal = null) => {
       const source = sourceStatementKey(text);
-      const key = source || (activeProposal ? "proposal:" + activeProposal.id : "node:" + turns.length);
-      let turn = bySource.get(key);
-      if (!turn) {
-        turn = { key, text: source || "Untitled segment", nodes: [], records: [], active: false };
-        bySource.set(key, turn);
+      let turn = lastTurn;
+      if (!turn || turn.text !== (source || "Untitled segment")) {
+        turn = { key: activeProposal ? "proposal:" + activeProposal.id : "turn:" + turns.length, text: source || "Untitled segment", nodes: [], records: [], active: false };
         turns.push(turn);
+        lastTurn = turn;
       }
       if (activeProposal) {
         turn.active = true;
@@ -410,13 +452,17 @@
     turns.forEach((turn) => {
       messages.push(chatMessage("user", esc(turn.text), "You"));
       const records = turn.records.filter((record) => fieldName(record) !== "validation");
-      if (records.length) messages.push(chatMessage("user", "<ul>" + records.map((record) => "<li>" + esc(answerSummary(record)) + "</li>").join("") + "</ul>", "You"));
+      records.forEach((record) => {
+        messages.push(chatMessage("assistant clarification", esc(recordPrompt(record)), "AutoGlific clarification"));
+        messages.push(chatMessage("assistant decision", esc(answerSummary(record)), "AutoGlific decision"));
+      });
       turn.nodes.forEach((node) => messages.push(chatMessage("assistant result", "<div class=\"step-confirmation\"><span class=\"step-detail\">" + nodeDisplay(node) + "</span><span class=\"recorded-inline\" role=\"img\" aria-label=\"Recorded\"><span class=\"step-check\" aria-hidden=\"true\">✓</span><span class=\"sr-only\">Recorded</span></span></div>", "AutoGlific")));
-      if (turn.active && session.state === "waiting_for_answer" && state.current_question && !isValidationQuestion(state.current_question)) {
-        const copy = friendlyQuestion(state.current_question);
-        messages.push(chatMessage("assistant question current-question", "<strong>" + esc(copy.heading) + "</strong><p>" + esc(copy.explanation) + "</p>", "AutoGlific · clarification"));
-      }
     });
+    if (session.state === "waiting_for_answer" && state.current_question && !isValidationQuestion(state.current_question)) {
+      const copy = friendlyQuestion(state.current_question);
+      const explanation = copy.explanation ? "<p>" + esc(copy.explanation) + "</p>" : "";
+      messages.push(chatMessage("assistant clarification current-question", "<strong>" + esc(copy.heading) + "</strong>" + explanation, "AutoGlific clarification"));
+    }
     if (session.state === "ready_for_review" || session.state === "frozen") messages.push(chatMessage("assistant completion", "Flow complete. Review the flow before generating or publishing anything by clicking the Review flow button at the top.", "AutoGlific"));
     if (session.state === "blocked") messages.push(chatMessage("assistant question", esc(session.blocked_error?.message || "This flow needs attention before it can continue."), "AutoGlific"));
     if (busy && workspaceMode === "authoring") messages.push(chatMessage("assistant working", "<span class=\"working\"><span class=\"spinner\"></span>Working on this segment…</span>", "AutoGlific"));
@@ -425,7 +471,6 @@
   function renderConversation() {
     const thread = $("thread");
     thread.innerHTML = conversationHtml();
-    if (busy || ["ready_for_review", "frozen"].includes(state?.session?.state)) window.setTimeout(() => { thread.scrollTop = thread.scrollHeight; }, 0);
   }
 
   function toSnake(value) { return String(value || "").normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").replace(/_+/g, "_").toLowerCase().slice(0, 40); }
@@ -467,6 +512,10 @@
     if (field === "input_type" || (question.answer_type === "options" && question.options?.length)) { control.innerHTML = renderInputTypeControl(question); attachChoiceCards(); return; }
     control.innerHTML = genericTextControl(field);
   }
+  function statusIcon(kind) {
+    if (kind === "warning") return "<svg class=\"status-icon warning-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><path d=\"M12 4 21 20H3L12 4Z\"></path><path d=\"M12 9v5m0 3h.01\"></path></svg>";
+    return "<svg class=\"status-icon\" viewBox=\"0 0 24 24\" aria-hidden=\"true\"><rect x=\"5\" y=\"10\" width=\"14\" height=\"10\" rx=\"2\"></rect><path d=\"M8 10V7a4 4 0 0 1 8 0v3\"></path></svg>";
+  }
   function autoAnswerValidation(question) {
     const key = [state?.session?.id, state?.session?.revision, question?.id].join(":");
     if (validationAutoAnswerKey === key || busy || !state || state.session.state !== "waiting_for_answer" || !isValidationQuestion(state.current_question) || state.current_question.id !== question.id) return;
@@ -480,7 +529,7 @@
         const payload = await request("/api/sessions/" + encodeURIComponent(sessionId) + "/answer", { method: "POST", body: JSON.stringify({ revision: expectedRevision, question_id: question.id, value: {} }) });
         renderedQuestionKey = "";
         busy = false;
-        apply(payload, null, true);
+        apply(payload, true);
         void loadSessions();
       } catch (error) { fail(error); }
     })();
@@ -498,8 +547,6 @@
     }
     $("answer-form").classList.toggle("hidden", !waiting);
     if (!waiting) { $("question-prompt").replaceChildren(); $("answer-control").replaceChildren(); renderedQuestionKey = ""; return; }
-    // The full clarification lives once in chronological chat; the bottom
-    // region contains only compact flow context, the answer control, and Continue.
     $("question-prompt").innerHTML = "<span class=\"clarification-context\">" + esc(clarificationContext(question)) + "</span>";
     const key = questionControlKey(question);
     if (renderedQuestionKey !== key || !$("answer-control").childElementCount) {
@@ -548,8 +595,8 @@
     $("send-instruction").disabled = !instructionVisible || busy;
     $("composer-hint").textContent = !state ? "Create a named flow to begin" : state.session.state === "waiting_for_answer" ? "Your answer is used exactly as entered" : blockedVisible ? "Flow needs attention" : lockedVisible ? "Review is required before the next action" : "Please share your flow one branch/step at a time.";
     $("locked-composer").classList.toggle("hidden", !(lockedVisible || blockedVisible));
-    if (lockedVisible) $("locked-composer").innerHTML = "<span aria-hidden=\"true\">🔒</span><span>Flow complete — ready for review</span>";
-    else if (blockedVisible) $("locked-composer").innerHTML = "<span aria-hidden=\"true\">⚠</span><span>Flow needs attention. Review the message above, then choose this flow again or start a new one.</span>";
+    if (lockedVisible) $("locked-composer").innerHTML = statusIcon("lock") + "<span>Flow complete — ready for review</span>";
+    else if (blockedVisible) $("locked-composer").innerHTML = statusIcon("warning") + "<span>Flow needs attention. Review the message above, then choose this flow again or start a new one.</span>";
     renderQuestion();
   }
 
@@ -761,22 +808,20 @@
     if (processPanel === "conversation") $("process-conversation-body").innerHTML = archiveConversationHtml();
     else if (processPanel === "mermaid") { renderedPresentationSource = ""; window.setTimeout(() => renderAuthoredMermaid(presentationMermaidSource(), "process-mermaid-graph"), 0); }
   }
-  function renderAdvanced() {
-    if (!state) { $("advanced-content").textContent = ""; return; }
-    const safe = { session: { id: state.session.id, title: state.session.title, revision: state.session.revision, state: state.session.state }, pipeline: state.pipeline, glific_publish: state.glific_publish, glific_publish_status: state.glific_publish_status, mermaid_render_error: mermaidRenderError, last_error: lastError ? { code: lastError.code, technical: lastError.technical } : null };
-    $("advanced-content").textContent = pretty(safe);
-  }
   function render() {
-    renderAlerts(); renderLibrary(); renderShell(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing(); renderAdvanced();
+    renderAlerts(); renderLibrary(); renderShell(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing();
+    if (!threadRevealPending) return;
+    threadRevealPending = false;
     const revealKey = clarificationRevealKey;
     const generation = clarificationRevealGeneration;
-    if (!revealKey || revealKey !== questionControlKey(state?.current_question)) return;
     window.setTimeout(() => {
-      if (generation !== clarificationRevealGeneration || clarificationRevealKey !== revealKey) return;
-      const questionBubble = $("thread").querySelector(".current-question");
-      if (questionBubble?.scrollIntoView) questionBubble.scrollIntoView({ block: "center", behavior: "auto" });
-      clarificationRevealKey = "";
-      renderQuestion();
+      if (generation !== clarificationRevealGeneration) return;
+      const thread = $("thread");
+      if (thread) thread.scrollTop = thread.scrollHeight;
+      if (revealKey && revealKey === questionControlKey(state?.current_question)) {
+        clarificationRevealKey = "";
+        renderQuestion();
+      }
     }, 0);
   }
 
@@ -790,7 +835,7 @@
   async function submitInstructionText(statement) {
     if (!state || state.session.state !== "editing" || busy || !statement.trim()) return;
     setBusy(true);
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/propose", { method: "POST", body: JSON.stringify({ revision: revision(), statement: statement.trim() }) }); $("instruction").value = ""; busy = false; apply(payload, "Segment recorded. Continue with the detail below.", true); void loadSessions(); }
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/propose", { method: "POST", body: JSON.stringify({ revision: revision(), statement: statement.trim() }) }); $("instruction").value = ""; busy = false; apply(payload, true); void loadSessions(); }
     catch (error) { fail(error); }
   }
   async function createFlow(event) {
@@ -800,20 +845,24 @@
     if (!title) { $("name-error").textContent = "Enter a flow name to continue."; titleInput.focus(); return; }
     const suffix = Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 7);
     setBusy(true);
-    try { const payload = await request("/api/sessions", { method: "POST", body: JSON.stringify({ session_id: "flow-" + suffix, title, reset: true }) }); workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; $("name-dialog").close(); titleInput.value = ""; $("name-error").textContent = ""; busy = false; window.history.replaceState({}, "", "?session=" + encodeURIComponent(payload.session.id)); apply(payload, "Flow created. Describe the first segment."); void loadSessions(); window.setTimeout(() => $("instruction").focus(), 0); }
+    try { const payload = await request("/api/sessions", { method: "POST", body: JSON.stringify({ session_id: "flow-" + suffix, title, reset: true }) }); workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; $("name-dialog").close(); titleInput.value = ""; $("name-error").textContent = ""; busy = false; window.history.replaceState({}, "", "?session=" + encodeURIComponent(payload.session.id)); apply(payload); void loadSessions(); window.setTimeout(() => $("instruction").focus(), 0); }
     catch (error) { fail(error); }
   }
   async function resumeSessionFromUrl() {
     const params = new URLSearchParams(window.location.search);
-    if (!params.has("session")) { render(); return; }
+    if (!params.has("session")) { workspaceMode = "landing"; state = null; render(); return; }
+    void loadSessions().catch((error) => fail(error));
     const sessionId = (params.get("session") || "").trim();
     if (!sessionId) { const error = new Error("Session does not exist."); error.code = "P4_SESSION_NOT_FOUND"; fail(error); return; }
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = "publishing"; validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, null, true); }
+    workspaceMode = "authoring";
+    processPanel = "publishing";
+    render();
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = "publishing"; validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, true); }
     catch (error) { state = null; workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; fail(error); }
   }
-  async function selectSession(sessionId) {
+  async function selectSession(sessionId, preferredProcessPanel = "publishing") {
     if (busy || !sessionId) return;
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = "publishing"; window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId)); validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, null, true); }
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = preferredProcessPanel; window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId)); validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, true); if (workspaceMode === "publishing" && processPanel !== preferredProcessPanel) { processPanel = preferredProcessPanel; render(); } }
     catch (error) { fail(error); }
   }
   async function submitInstruction(event) { event.preventDefault(); await submitInstructionText($("instruction").value); }
@@ -824,7 +873,7 @@
     let value;
     try { value = readAnswer(question); } catch (error) { fail(error); return; }
     setBusy(true);
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/answer", { method: "POST", body: JSON.stringify({ revision: revision(), question_id: question.id, value }) }); renderedQuestionKey = ""; busy = false; apply(payload, "Answer saved. Continue with the next detail.", true); void loadSessions(); }
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/answer", { method: "POST", body: JSON.stringify({ revision: revision(), question_id: question.id, value }) }); renderedQuestionKey = ""; busy = false; apply(payload, true); void loadSessions(); }
     catch (error) { fail(error); }
   }
   async function confirmFlow() {
@@ -837,14 +886,14 @@
       publishingPhase = "compiling"; apply(frozen);
       const compiled = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/compile", { method: "POST", body: JSON.stringify({ revision: frozen.session.revision }) });
       publishingPhase = compiled.pipeline?.all_stages_passed ? null : "failed";
-      apply(compiled, compiled.pipeline?.all_stages_passed ? "The final Glific payload is ready; Glific confirmation is next." : "The pipeline needs attention before publishing."); busy = false; render();
+      apply(compiled); busy = false; render();
       if (compiled.pipeline?.all_stages_passed) await pushToGlific(true);
     } catch (error) { publishingPhase = "failed"; fail(error); }
   }
   async function compilePipeline() {
     if (!state || busy || state.session.state !== "frozen") return;
     workspaceMode = "publishing"; processPanel = "publishing"; publishingPhase = "compiling"; generating = true; setBusy(true);
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/compile", { method: "POST", body: JSON.stringify({ revision: revision() }) }); generating = false; publishingPhase = payload.pipeline?.all_stages_passed ? null : "failed"; busy = false; apply(payload, payload.pipeline?.all_stages_passed ? "The final Glific payload is ready; Glific confirmation is next." : "The pipeline needs attention. Retry safely from this panel."); }
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/compile", { method: "POST", body: JSON.stringify({ revision: revision() }) }); generating = false; publishingPhase = payload.pipeline?.all_stages_passed ? null : "failed"; busy = false; apply(payload); }
     catch (error) { generating = false; publishingPhase = "failed"; fail(error); }
   }
   function stopGlificStatusPolling() { if (glificStatusPoller !== null) { window.clearInterval(glificStatusPoller); glificStatusPoller = null; } }
@@ -856,15 +905,58 @@
     if (!state || busy || glificPublishing || !compiledArtifact()) return;
     const wasPublished = Boolean(state.glific_publish);
     workspaceMode = "publishing"; processPanel = "publishing"; glificPublishing = true; publishingPhase = "publishing"; dismissToast(); setBusy(true); startGlificStatusPolling();
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/publish", { method: "POST", body: JSON.stringify({ revision: revision() }) }); stopGlificStatusPolling(); glificPublishing = false; publishingPhase = null; busy = false; apply(payload, "Glific confirmed publication."); if (!wasPublished && payload.glific_publish) launchConfetti(payload.session.id); }
+    try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/publish", { method: "POST", body: JSON.stringify({ revision: revision() }) }); stopGlificStatusPolling(); glificPublishing = false; publishingPhase = null; busy = false; apply(payload); if (!wasPublished && payload.glific_publish) launchConfetti(payload.session.id); }
     catch (error) { stopGlificStatusPolling(); glificPublishing = false; publishingPhase = "failed"; fail(error); }
   }
   async function downloadArtifact(kind) {
     if (!state) return;
-    try { const link = document.createElement("a"); link.href = "/api/sessions/" + encodeURIComponent(state.session.id) + "/download/" + kind; link.download = kind === "glific" ? "glific.json" : kind === "presentation-mermaid" ? "presentation.mmd" : kind + ".json"; link.hidden = true; document.body.appendChild(link); link.click(); window.setTimeout(() => link.remove(), 1000); showToast("success", kind === "glific" ? "Final Glific JSON downloaded." : "Mermaid graph downloaded."); }
+    try { const link = document.createElement("a"); link.href = "/api/sessions/" + encodeURIComponent(state.session.id) + "/download/" + kind; link.download = kind === "glific" ? "glific.json" : kind === "presentation-mermaid" ? "presentation.mmd" : kind + ".json"; link.hidden = true; document.body.appendChild(link); link.click(); window.setTimeout(() => link.remove(), 1000); }
     catch (error) { fail(error); }
   }
-  async function copyMermaid() { try { await navigator.clipboard.writeText(technicalAuthoredMermaidSource()); showToast("success", "Mermaid source copied."); } catch (error) { fail(error); } }
+  async function copyMermaid() { try { await navigator.clipboard.writeText(technicalAuthoredMermaidSource()); } catch (error) { fail(error); } }
+  function resetActiveView() {
+    stopGlificStatusPolling();
+    state = null;
+    busy = false;
+    generating = false;
+    glificPublishing = false;
+    workspaceMode = "landing";
+    processPanel = "publishing";
+    reviewPanel = "mermaid";
+    publishingPhase = null;
+    validationAutoAnswerKey = "";
+    renderedQuestionKey = "";
+    clarificationRevealKey = "";
+    clarificationRevealGeneration += 1;
+    threadRevealPending = false;
+    renderedPresentationSource = "";
+    mermaidRenderError = null;
+    lastError = null;
+    toastVisible = false;
+    clearToastTimer();
+  }
+  function goHome() {
+    resetActiveView();
+    window.history.replaceState({}, "", window.location.pathname || "/");
+    render();
+  }
+  function startNewFlow() {
+    if (busy) return;
+    resetActiveView();
+    workspaceMode = "authoring";
+    window.history.replaceState({}, "", window.location.pathname || "/");
+    render();
+    openNameDialog();
+    void loadSessions().catch((error) => fail(error));
+  }
+  async function startFromLanding() {
+    if (busy) return;
+    try {
+      await loadSessions();
+      if (!sessions.length) { startNewFlow(); return; }
+      await selectSession(sessions[0].id, "conversation");
+    } catch (error) { fail(error); }
+  }
   function openNameDialog() { if (!busy) { $("name-error").textContent = ""; $("name-dialog").showModal(); window.setTimeout(() => $("flow-name").focus(), 0); } }
   async function openSettings() {
     $("settings-dialog").showModal();
@@ -890,6 +982,10 @@
       renderTabState,
       setState(payload) { state = payload; workspaceMode = "authoring"; processPanel = "publishing"; },
       setTestFlags({ busy: nextBusy = false, glificPublishing: nextPublishing = false } = {}) { busy = nextBusy; glificPublishing = nextPublishing; },
+      startNewFlow,
+      startFromLanding,
+      goHome,
+      resumeSessionFromUrl,
       showToast,
       stableChoiceValues,
       renderOptionEditor,
@@ -902,15 +998,17 @@
   }
 
   $("flow-list").addEventListener("click", (event) => { const button = event.target.closest("[data-session-id]"); if (button) void selectSession(button.dataset.sessionId); });
+  $("landing-start-hero").addEventListener("click", startFromLanding);
+  $("landing-start-closing").addEventListener("click", startFromLanding);
   $("new-flow").addEventListener("click", openNameDialog);
   $("name-form").addEventListener("submit", createFlow);
   $("cancel-name").addEventListener("click", () => $("name-dialog").close());
+  $("home-button").addEventListener("click", goHome);
   $("settings-button").addEventListener("click", () => void openSettings());
   $("close-settings").addEventListener("click", () => $("settings-dialog").close());
   $("alerts").addEventListener("click", (event) => { if (event.target.closest(".alert-close")) dismissToast(); });
   $("instruction-form").addEventListener("submit", submitInstruction);
   $("answer-form").addEventListener("submit", submitAnswer);
-  $("save-flow").addEventListener("click", () => showToast("success", "This flow is saved in the local workbench."));
   $("review-flow").addEventListener("click", () => { if (isReviewReady() && !busy) { workspaceMode = "review"; invalidateMermaidRender(); render(); } });
   $("modify-flow").addEventListener("click", () => { workspaceMode = "authoring"; renderedPresentationSource = ""; render(); window.setTimeout(() => $("instruction").focus(), 0); });
   $("confirm-flow").addEventListener("click", () => void confirmFlow());
@@ -922,6 +1020,5 @@
   $("publication-retry").addEventListener("click", () => void pushToGlific());
   $("download-json").addEventListener("click", () => void downloadArtifact("glific"));
   $("download-mermaid").addEventListener("click", () => void downloadArtifact("presentation-mermaid"));
-  void loadSessions().catch((error) => fail(error));
   void resumeSessionFromUrl();
 })();

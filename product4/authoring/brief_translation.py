@@ -6,10 +6,12 @@ import hashlib
 import json
 import os
 import re
+import socket
 import urllib.request
+import uuid
 from collections.abc import Mapping
 from typing import Any, Literal, Protocol
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -37,7 +39,180 @@ from .trigger_metadata import validate_provider_trigger_intent
 
 
 class SemanticTranslationError(ValueError):
-    pass
+    """Safe semantic failure carrying only stable diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        request_id: str | None = None,
+        validation_fingerprint: str | None = None,
+        network_subtype: str | None = None,
+    ) -> None:
+        self.code = code or _leading_error_code(message)
+        self.request_id = request_id if _safe_request_id(request_id) else None
+        self.validation_fingerprint = safe_validation_fingerprint(validation_fingerprint)
+        self.network_subtype = safe_network_subtype(network_subtype)
+        super().__init__(message)
+
+
+_REQUEST_ID_RE = re.compile(r"^REQ-[A-F0-9]{12}$")
+_VALIDATION_TYPE_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
+_VALIDATION_FINGERPRINT_RE = re.compile(
+    r"^phase=[a-z0-9_.-]{1,64};issues="
+    r"(?:[A-Za-z0-9_.<>-]{1,96}:[a-z0-9_.<>-]{1,64})"
+    r"(?:\|[A-Za-z0-9_.<>-]{1,96}:[a-z0-9_.<>-]{1,64}){0,7}$"
+)
+_SAFE_VALIDATION_FIELDS = frozenset({
+    "schema_version", "outcome", "nodes", "id", "position_path", "capability",
+    "node_statement", "source_excerpt", "supplied_values", "semantic_questions",
+    "capture_reference", "capture_reference_question", "issue_code", "issue_message",
+    "routing", "kind", "scope", "choice_group_id", "option_id", "question", "options",
+    "label", "value", "target", "prompt", "answer_type", "status", "keywords",
+    "trigger_intent",
+})
+
+
+def _new_request_id() -> str:
+    return f"REQ-{uuid.uuid4().hex[:12].upper()}"
+
+
+def _safe_request_id(value: Any) -> bool:
+    return isinstance(value, str) and _REQUEST_ID_RE.fullmatch(value) is not None
+
+
+def safe_validation_fingerprint(value: Any) -> str | None:
+    """Accept only the bounded phase/location/type diagnostic format."""
+
+    if not isinstance(value, str) or _VALIDATION_FINGERPRINT_RE.fullmatch(value) is None:
+        return None
+    _, issues_text = value.split(";issues=", 1)
+    for entry in issues_text.split("|"):
+        location, issue_type = entry.rsplit(":", 1)
+        for token in location.split("."):
+            if token == "<root>" or token == "<redacted>" or token.isdigit():
+                continue
+            if token not in _SAFE_VALIDATION_FIELDS:
+                return None
+        if issue_type != "<redacted>" and not _VALIDATION_TYPE_RE.fullmatch(issue_type):
+            return None
+    return value
+
+
+def _safe_validation_location(location: Any) -> str:
+    if not isinstance(location, (list, tuple)):
+        return "<root>"
+    parts: list[str] = []
+    for item in location:
+        if isinstance(item, int) and not isinstance(item, bool) and 0 <= item <= 999:
+            parts.append(str(item))
+        elif isinstance(item, str) and item in _SAFE_VALIDATION_FIELDS:
+            parts.append(item)
+        else:
+            parts.append("<redacted>")
+    return ".".join(parts) or "<root>"
+
+
+def validation_fingerprint(error: ValidationError, *, phase: str) -> str:
+    """Summarize Pydantic errors without retaining messages, inputs, or context."""
+
+    try:
+        issues = error.errors(
+            include_context=False,
+            include_input=False,
+            include_url=False,
+        )
+    except TypeError:
+        issues = error.errors()
+    entries: list[str] = []
+    for issue in issues[:8]:
+        raw_type = issue.get("type")
+        issue_type = raw_type if isinstance(raw_type, str) and _VALIDATION_TYPE_RE.fullmatch(raw_type) else "<redacted>"
+        entries.append(f"{_safe_validation_location(issue.get('loc'))}:{issue_type}")
+    if not entries:
+        entries.append("<root>:<redacted>")
+    fingerprint = f"phase={phase};issues={'|'.join(entries)}"
+    return safe_validation_fingerprint(fingerprint) or "phase=unknown;issues=<root>:<redacted>"
+
+
+def simple_validation_fingerprint(*, phase: str, issue_type: str) -> str:
+    safe_type = issue_type if _VALIDATION_TYPE_RE.fullmatch(issue_type) else "<redacted>"
+    fingerprint = f"phase={phase};issues=<root>:{safe_type}"
+    return safe_validation_fingerprint(fingerprint) or "phase=unknown;issues=<root>:<redacted>"
+
+
+_SAFE_NETWORK_SUBTYPES = frozenset({"timeout", "dns", "connect", "network"})
+
+
+def safe_network_subtype(value: Any) -> str | None:
+    """Accept only the bounded network diagnostic vocabulary."""
+
+    return value if isinstance(value, str) and value in _SAFE_NETWORK_SUBTYPES else None
+
+
+def classify_semantic_network_failure(exc: BaseException) -> str:
+    """Classify network exceptions without inspecting endpoint or exception text."""
+
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "timeout"
+    if isinstance(exc, socket.gaierror):
+        return "dns"
+    if isinstance(exc, URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return "timeout"
+        if isinstance(reason, socket.gaierror):
+            return "dns"
+        if isinstance(reason, (ConnectionError, OSError)):
+            return "connect"
+        return "network"
+    if isinstance(exc, (ConnectionError, OSError)):
+        return "connect"
+    return "network"
+
+
+def _leading_error_code(message: Any) -> str:
+    match = re.match(r"(P4_[A-Z0-9_]+)", str(message))
+    return match.group(1) if match else "P4_SEMANTIC_PROVIDER_FAILURE"
+
+
+def classify_semantic_http_failure(
+    status: int,
+    provider_signals: str = "",
+    *,
+    project_configured: bool = False,
+) -> str:
+    """Classify HTTP failures without exposing provider response text."""
+
+    signals = str(provider_signals).casefold()
+    if status == 401 or any(token in signals for token in (
+        "invalid_api_key", "incorrect_api_key", "authentication", "unauthorized",
+    )):
+        return "P4_SEMANTIC_AUTHENTICATION_FAILED"
+    if status == 403:
+        if project_configured or any(token in signals for token in (
+            "project", "permission", "access_denied", "organization",
+        )):
+            return "P4_SEMANTIC_PROJECT_ACCESS_FAILED"
+        return "P4_SEMANTIC_AUTHENTICATION_FAILED"
+    if any(token in signals for token in (
+        "insufficient_quota", "quota", "billing", "hard_limit",
+    )):
+        return "P4_SEMANTIC_QUOTA_EXCEEDED"
+    if status == 429 or any(token in signals for token in (
+        "rate_limit", "too_many_requests", "throttl",
+    )):
+        return "P4_SEMANTIC_RATE_LIMITED"
+    if any(token in signals for token in (
+        "model_not_found", "model_not_available", "invalid_model",
+    )) or (status == 404 and "model" in signals):
+        return "P4_SEMANTIC_MODEL_UNAVAILABLE"
+    if status in {408, 504}:
+        return "P4_SEMANTIC_NETWORK_FAILURE"
+    if status >= 500:
+        return "P4_SEMANTIC_PROVIDER_UNAVAILABLE"
+    return "P4_SEMANTIC_PROVIDER_FAILURE"
 
 
 TRANSLATION_CONTRACT_VERSION = "product4-brief-translation-1.0"
@@ -55,6 +230,16 @@ _QUOTED_SPAN_PATTERNS = (
     re.compile(r"“([^”\r\n]*)”"),
     re.compile(r"‘([^’\r\n]*)’"),
 )
+_EXPLICIT_INTEGER_RANGE_RE = re.compile(
+    r"(?<!\d)(?P<start>\d{1,3})\s*(?:to|through|[-–—])\s*"
+    r"(?P<end>\d{1,3})(?!\d)",
+    re.IGNORECASE,
+)
+_INTEGER_TOKEN_RE = re.compile(r"(?<!\d)(\d{1,3})(?!\d)")
+_INTEGER_WORDS = {
+    0: "zero", 1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
+    6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
+}
 
 
 class ProviderTranslationNode(BaseModel):
@@ -508,6 +693,27 @@ class ProductionSemanticTransport:
         self.project_id = project_id.strip() if project_id else None
         self.http_client = http_client or UrlLibJsonHttpClient()
         self.timeout_seconds = timeout_seconds
+        self.last_request_id: str | None = None
+
+    @staticmethod
+    def _provider_signals(exc: HTTPError) -> str:
+        """Read bounded fields only for classification; never retain the body."""
+
+        try:
+            raw = exc.read(4096)
+        except (AttributeError, OSError):
+            return ""
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return ""
+        error = payload.get("error") if isinstance(payload, dict) else None
+        if not isinstance(error, dict):
+            return ""
+        return " ".join(
+            str(error.get(key) or "")[:120]
+            for key in ("type", "code", "param", "message")
+        )
 
     @classmethod
     def from_environment(
@@ -525,6 +731,8 @@ class ProductionSemanticTransport:
 
     def complete(self, request: dict[str, Any]) -> str:
         workbench_mode = request.get("workbench_mode") == "incremental_segment_planning"
+        request_id = _new_request_id()
+        self.last_request_id = request_id
         payload = {
             "model": self.model,
             "response_format": {
@@ -568,33 +776,49 @@ class ProductionSemanticTransport:
                 timeout_seconds=self.timeout_seconds,
             )
         except HTTPError as exc:
-            detail = ""
-            try:
-                payload = json.loads(exc.read().decode("utf-8"))
-                error = payload.get("error") if isinstance(payload, dict) else None
-                if isinstance(error, dict):
-                    detail = str(error.get("message") or "")
-                elif isinstance(payload, dict):
-                    detail = str(payload.get("message") or "")
-            except (UnicodeDecodeError, json.JSONDecodeError, OSError):
-                detail = ""
-            detail = " ".join(detail.split())[:300]
-            if detail:
-                detail = detail.replace(self.api_key, "[redacted]")
-                if self.project_id:
-                    detail = detail.replace(self.project_id, "[redacted]")
-            suffix = f":status={exc.code}" + (f":{detail}" if detail else "")
+            code = classify_semantic_http_failure(
+                int(exc.code),
+                self._provider_signals(exc),
+                project_configured=bool(self.project_id),
+            )
             raise SemanticTranslationError(
-                f"P4_SEMANTIC_PROVIDER_FAILURE:HTTPError{suffix}"
+                f"P4_SEMANTIC_PROVIDER_FAILURE:HTTPError:status={exc.code}",
+                code=code,
+                request_id=request_id,
+            ) from exc
+        except (TimeoutError, URLError, ConnectionError, OSError) as exc:
+            raise SemanticTranslationError(
+                f"P4_SEMANTIC_PROVIDER_FAILURE:{type(exc).__name__}",
+                code="P4_SEMANTIC_NETWORK_FAILURE",
+                request_id=request_id,
+                network_subtype=classify_semantic_network_failure(exc),
+            ) from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SemanticTranslationError(
+                "P4_SEMANTIC_PROVIDER_RESPONSE_INVALID",
+                code="P4_SEMANTIC_PROVIDER_RESPONSE_INVALID",
+                request_id=request_id,
             ) from exc
         except Exception as exc:
-            raise SemanticTranslationError(f"P4_SEMANTIC_PROVIDER_FAILURE:{type(exc).__name__}") from exc
+            raise SemanticTranslationError(
+                f"P4_SEMANTIC_PROVIDER_FAILURE:{type(exc).__name__}",
+                code="P4_SEMANTIC_PROVIDER_FAILURE",
+                request_id=request_id,
+            ) from exc
         try:
             content = response["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise SemanticTranslationError("P4_SEMANTIC_PROVIDER_RESPONSE_INVALID") from exc
+            raise SemanticTranslationError(
+                "P4_SEMANTIC_PROVIDER_RESPONSE_INVALID",
+                code="P4_SEMANTIC_PROVIDER_RESPONSE_INVALID",
+                request_id=request_id,
+            ) from exc
         if not isinstance(content, str) or not content.strip():
-            raise SemanticTranslationError("P4_SEMANTIC_PROVIDER_RESPONSE_EMPTY")
+            raise SemanticTranslationError(
+                "P4_SEMANTIC_PROVIDER_RESPONSE_EMPTY",
+                code="P4_SEMANTIC_PROVIDER_RESPONSE_EMPTY",
+                request_id=request_id,
+            )
         return content
 
 
@@ -791,22 +1015,62 @@ def _validate_explicit_field_provenance(
                 f"P4_TRANSLATION_EXACT_STRING_SOURCE_MISMATCH:{node_id}:{field_path}"
             )
     elif field_path == "options" and (
-        not isinstance(value, list) or any(
-            not isinstance(item, Mapping)
-            or str(item.get("label") or "") not in field_source_excerpt
-            or (
-                str(item.get("value") or "") not in field_source_excerpt
-                and str(item.get("value") or "")
-                != re.sub(
-                    r"[^a-z0-9]+", "_", str(item.get("label") or "").casefold()
-                ).strip("_")
-            )
+        not isinstance(value, list)
+        or any(
+            not _choice_option_has_explicit_provenance(item, field_source_excerpt)
             for item in value
         )
     ):
-            raise SemanticTranslationError(
-                f"P4_TRANSLATION_CHOICE_SOURCE_MISMATCH:{node_id}:{field_path}"
-            )
+        raise SemanticTranslationError(
+            f"P4_TRANSLATION_CHOICE_SOURCE_MISMATCH:{node_id}:{field_path}"
+        )
+
+
+def _explicit_integer_range_number(label: str, source_excerpt: str) -> int | None:
+    """Return a numeric label's value when an explicit source range supports it."""
+
+    tokens = _INTEGER_TOKEN_RE.findall(label)
+    if len(tokens) != 1:
+        return None
+    number = int(tokens[0])
+    if label.strip() != str(number):
+        return None
+    for match in _EXPLICIT_INTEGER_RANGE_RE.finditer(source_excerpt):
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if start <= end and end - start <= 9 and start <= number <= end:
+            return number
+    return None
+
+
+def _range_derived_stable_value(value: str, number: int) -> bool:
+    """Accept only a stable identifier that preserves the explicit option number."""
+
+    numeric_tokens = [int(token) for token in _INTEGER_TOKEN_RE.findall(value)]
+    if numeric_tokens:
+        return len(numeric_tokens) == 1 and numeric_tokens[0] == number
+    word = _INTEGER_WORDS.get(number)
+    return bool(
+        word
+        and re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", value.casefold())
+    )
+
+
+def _choice_option_has_explicit_provenance(item: Any, source_excerpt: str) -> bool:
+    if not isinstance(item, Mapping):
+        return False
+    label = str(item.get("label") or "")
+    stable_value = str(item.get("value") or "")
+    range_number = _explicit_integer_range_number(label, source_excerpt)
+    label_is_sourced = label in source_excerpt or range_number is not None
+    if not label_is_sourced:
+        return False
+    if stable_value in source_excerpt:
+        return True
+    slug = re.sub(r"[^a-z0-9]+", "_", label.casefold()).strip("_")
+    if stable_value == slug:
+        return True
+    return range_number is not None and _range_derived_stable_value(stable_value, range_number)
 
 
 def _has_valid_explicit_field_provenance(
@@ -895,10 +1159,23 @@ class BriefSemanticTranslator:
                 "fabricate a registered capability to satisfy the schema."
             ),
         }
-        raw = self.transport.complete(request)
+        request_id = getattr(self.transport, "last_request_id", None)
+        validation_phase = "brief_json"
         try:
+            raw = self.transport.complete(request)
+            request_id = getattr(self.transport, "last_request_id", None) or request_id
             envelope = json.loads(_repair_json_envelope(raw))
+            if not isinstance(envelope, dict):
+                raise SemanticTranslationError(
+                    "P4_TRANSLATION_OUTPUT_MALFORMED",
+                    code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                    request_id=request_id,
+                    validation_fingerprint=simple_validation_fingerprint(
+                        phase="brief_json", issue_type="object_required"
+                    ),
+                )
             if envelope.get("schema_version") == PROVIDER_RESULT_VERSION:
+                validation_phase = "brief_provider_result"
                 result = ProviderTranslationResult.model_validate(envelope)
                 if result.outcome != "translated":
                     raise SemanticTranslationError(
@@ -907,12 +1184,46 @@ class BriefSemanticTranslator:
                 translation = self._adapt_provider_result(brief, result)
             else:
                 # Backward-compatible parser for recorded/offline 1.0 fixtures only.
+                validation_phase = "brief_legacy_result"
                 translation = BriefSemanticTranslation.model_validate(envelope)
-        except SemanticTranslationError:
+            validation_phase = "brief_semantics"
+            self._validate_semantics(brief, translation)
+        except SemanticTranslationError as exc:
+            request_id = getattr(self.transport, "last_request_id", None) or request_id
+            if request_id and not exc.request_id:
+                raise SemanticTranslationError(
+                    str(exc),
+                    code=exc.code,
+                    request_id=request_id,
+                    validation_fingerprint=exc.validation_fingerprint,
+                    network_subtype=exc.network_subtype,
+                ) from exc
             raise
-        except (ValidationError, ValueError) as exc:
-            raise SemanticTranslationError(f"P4_TRANSLATION_OUTPUT_MALFORMED: {exc}") from exc
-        self._validate_semantics(brief, translation)
+        except ValidationError as exc:
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=validation_fingerprint(exc, phase=validation_phase),
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=simple_validation_fingerprint(
+                    phase="brief_json", issue_type="json_invalid"
+                ),
+            ) from exc
+        except ValueError as exc:
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=simple_validation_fingerprint(
+                    phase=validation_phase, issue_type="value_error"
+                ),
+            ) from exc
         return translation
 
     @staticmethod
@@ -1285,8 +1596,11 @@ class IncrementalSemanticModelClient:
         request = self._request(statement, position, context)
         call = {"kind": "interpret", "request": request}
         self.calls.append(call)
-        raw = self.transport.complete(request)
+        request_id = getattr(self.transport, "last_request_id", None)
+        validation_phase = "incremental_json"
         try:
+            raw = self.transport.complete(request)
+            request_id = getattr(self.transport, "last_request_id", None) or request_id
             envelope = json.loads(_repair_json_envelope(raw))
             call["provider_response"] = envelope
             envelope, discarded = _normalize_incremental_unresolved_wrappers(envelope, statement)
@@ -1294,36 +1608,94 @@ class IncrementalSemanticModelClient:
                 call["normalization"] = {
                     "discarded_provider_fields": discarded,
                 }
+            if envelope.get("outcome") == "translated" and envelope.get("nodes") == []:
+                raw_trigger_intent = envelope.get("trigger_intent")
+                try:
+                    trigger_intent = (
+                        FlowTriggerIntent.model_validate(raw_trigger_intent)
+                        if raw_trigger_intent is not None
+                        else None
+                    )
+                except ValidationError:
+                    trigger_intent = None
+                if trigger_intent is not None:
+                    try:
+                        validate_provider_trigger_intent(trigger_intent, statement)
+                    except ValueError as exc:
+                        raise SemanticTranslationError(
+                            str(exc), request_id=request_id
+                        ) from exc
+                    if trigger_intent.status == "explicit" and trigger_intent.keywords:
+                        raise SemanticTranslationError(
+                            "P4_TRANSLATION_TRIGGER_ONLY",
+                            code="P4_TRANSLATION_TRIGGER_ONLY",
+                            request_id=request_id,
+                        )
+            validation_phase = "incremental_result"
             result = IncrementalProviderTranslationResult.model_validate(envelope)
-        except (ValidationError, ValueError) as exc:
-            raise SemanticTranslationError(f"P4_TRANSLATION_OUTPUT_MALFORMED: {exc}") from exc
-        if result.outcome != "translated":
-            raise SemanticTranslationError(
-                f"P4_TRANSLATION_{result.outcome.upper()}:{result.issue_code}:{result.issue_message}"
+            if result.outcome != "translated":
+                raise SemanticTranslationError(
+                    f"P4_TRANSLATION_{result.outcome.upper()}:{result.issue_code}:{result.issue_message}"
+                )
+            try:
+                validate_provider_trigger_intent(result.trigger_intent, statement)
+            except ValueError as exc:
+                raise SemanticTranslationError(str(exc)) from exc
+            translation = BriefSemanticTranslator._adapt_provider_result(statement, result)
+            BriefSemanticTranslator._validate_incremental_segment(
+                statement,
+                translation,
+                tuple(position.branch_path),
+                result.routing,
             )
-        try:
-            validate_provider_trigger_intent(result.trigger_intent, statement)
+            self.segment_nodes = {node.id: node for node in translation.nodes}
+            self.pending_segment_nodes = list(translation.nodes[1:])
+            node = translation.nodes[0]
+            self.active = node
+            self.routing = result.routing
+            self.segment_trigger_intent = (
+                result.trigger_intent
+                if result.trigger_intent is not None and result.trigger_intent.status != "none"
+                else None
+            )
+            self.segment_root_node_id = node.id
+            return self._node_result(node)
+        except SemanticTranslationError as exc:
+            request_id = getattr(self.transport, "last_request_id", None) or request_id
+            if request_id and not exc.request_id:
+                raise SemanticTranslationError(
+                    str(exc),
+                    code=exc.code,
+                    request_id=request_id,
+                    validation_fingerprint=exc.validation_fingerprint,
+                    network_subtype=exc.network_subtype,
+                ) from exc
+            raise
+        except ValidationError as exc:
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=validation_fingerprint(exc, phase=validation_phase),
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=simple_validation_fingerprint(
+                    phase="incremental_json", issue_type="json_invalid"
+                ),
+            ) from exc
         except ValueError as exc:
-            raise SemanticTranslationError(str(exc)) from exc
-        translation = BriefSemanticTranslator._adapt_provider_result(statement, result)
-        BriefSemanticTranslator._validate_incremental_segment(
-            statement,
-            translation,
-            tuple(position.branch_path),
-            result.routing,
-        )
-        self.segment_nodes = {node.id: node for node in translation.nodes}
-        self.pending_segment_nodes = list(translation.nodes[1:])
-        node = translation.nodes[0]
-        self.active = node
-        self.routing = result.routing
-        self.segment_trigger_intent = (
-            result.trigger_intent
-            if result.trigger_intent is not None and result.trigger_intent.status != "none"
-            else None
-        )
-        self.segment_root_node_id = node.id
-        return self._node_result(node)
+            raise SemanticTranslationError(
+                "P4_TRANSLATION_OUTPUT_MALFORMED",
+                code="P4_TRANSLATION_OUTPUT_MALFORMED",
+                request_id=request_id,
+                validation_fingerprint=simple_validation_fingerprint(
+                    phase=validation_phase, issue_type="value_error"
+                ),
+            ) from exc
 
     def _node_result(self, node: TranslationNode) -> dict[str, Any]:
         supplied_values = dict(node.supplied_values)

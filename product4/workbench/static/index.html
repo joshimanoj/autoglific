@@ -3,21 +3,68 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AutoGlific — Build Glific flows in natural language</title>
+    <title>AutoGlific — Build Glific flows in plain language</title>
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <div id="app" class="app" data-view="authoring">
-      <header class="masthead">
-        <div class="brand"><span class="brand-mark" aria-hidden="true"><svg class="brand-icon" viewBox="0 0 24 24" focusable="false"><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="7" r="2.5"></circle><circle cx="12" cy="18" r="2.5"></circle><path d="M8.4 6.2l7.1.6M7.4 8.1l3.4 7.6M16.7 9.2l-3.4 6.5"></path></svg></span><div><strong>AutoGlific</strong><span>Build Glific flows in natural language</span></div></div><div id="alerts" class="alerts" aria-live="assertive"></div>
-      </header>
+    <div id="app" class="app" data-view="landing">
+      <div id="alerts" class="alerts" aria-live="assertive"></div>
 
-      <main class="workspace">
+      <main id="landing-view" class="landing-view" aria-labelledby="landing-title">
+        <header class="landing-header">
+          <a class="landing-brand" href="#landing-top" aria-label="AutoGlific home">
+            <span class="logo-mark" aria-hidden="true"><svg viewBox="0 0 48 48" focusable="false"><path class="logo-bubble" d="M10 8.5h25.5A5.5 5.5 0 0 1 41 14v17a5.5 5.5 0 0 1-5.5 5.5H23l-8.5 5v-5H10A5.5 5.5 0 0 1 4.5 31V14A5.5 5.5 0 0 1 10 8.5Z"></path><path d="M14 27V18h9m0 0 8 8m-8-8v12"></path><circle cx="14" cy="18" r="2.4"></circle><circle cx="31" cy="26" r="2.4"></circle><circle cx="23" cy="30" r="2.4"></circle></svg></span>
+            <span class="wordmark"><strong>Auto</strong><strong>Glific</strong></span>
+            <span class="brand-note">For nonprofit teams using Glific</span>
+          </a>
+          <nav aria-label="Primary navigation"><a href="#landing-top">Home</a></nav>
+        </header>
+
+        <section id="landing-top" class="landing-hero" aria-labelledby="landing-title">
+          <div class="landing-hero-copy">
+            <p class="landing-eyebrow"><span aria-hidden="true"></span>Built for nonprofit programme teams</p>
+            <h1 id="landing-title">Build Glific flows in plain language.</h1>
+            <p class="landing-lead">AutoGlific turns your programme idea into a clear WhatsApp journey. Shape it step by step, review the complete flow, and publish to Glific when you are ready.</p>
+            <div class="landing-actions"><button id="landing-start-hero" class="landing-primary" type="button">Start now <span aria-hidden="true">→</span></button><span>Designed for non-technical team members.</span></div>
+          </div>
+          <div class="landing-preview" aria-hidden="true">
+            <div class="preview-top"><strong>Your programme idea</strong><span><i></i> In progress</span></div>
+            <div class="preview-prompt">Help families find the right maternal and child health support.</div>
+            <div class="preview-divider"></div>
+            <div class="preview-flow">
+              <div class="preview-flow-row"><span class="preview-dot primary"></span><div><strong>Welcome families</strong><small>Send a clear opening message</small></div></div>
+              <div class="preview-stem"></div>
+              <div class="preview-flow-row"><span class="preview-dot"></span><div><strong>Ask what support they need</strong><small>Create simple, human choices</small></div></div>
+              <div class="preview-branches"><span>Pregnancy</span><span>Newborn care</span><span>Nutrition</span></div>
+              <div class="preview-stem short"></div>
+              <div class="preview-review"><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"></path></svg>Ready for review</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="landing-how" aria-labelledby="how-title">
+          <div class="landing-section-heading"><p>A clearer way to build</p><h2 id="how-title">How it works</h2></div>
+          <ol class="landing-steps">
+            <li><span>01</span><div><h3>Describe each step</h3><p>Share what should happen, one step or branch at a time.</p></div></li>
+            <li><span>02</span><div><h3>Review the journey</h3><p>See the complete flow visually, check every path, and make changes.</p></div></li>
+            <li><span>03</span><div><h3>Confirm and publish</h3><p>Approve the final flow and publish it to Glific when you are ready.</p></div></li>
+          </ol>
+        </section>
+
+        <section class="landing-closing" aria-labelledby="closing-title">
+          <div><p>Built around your programme</p><h2 id="closing-title">Ready to build a flow for your community?</h2></div>
+          <button id="landing-start-closing" class="landing-closing-action" type="button">Start now <span aria-hidden="true">→</span></button>
+        </section>
+
+        <footer class="landing-footer"><strong>AutoGlific</strong><span>From programme intent to a reviewable WhatsApp flow.</span></footer>
+      </main>
+
+      <main class="workspace" id="workspace-view">
         <aside class="library" aria-label="Saved flows">
           <div class="library-top"><button id="new-flow" class="button primary new-flow" type="button">+ New flow</button></div>
           <div class="library-heading"><span class="section-label">Your flows</span><span id="flow-count-display">0 saved</span></div>
           <nav id="flow-list" class="flow-list" aria-label="Your flows"></nav>
-          <div class="library-footer"><span id="flow-count">No saved flows</span><button id="settings-button" class="settings-button" type="button" aria-label="Settings"><svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"></path><path d="m19.2 13.1 1.1.8-1.6 2.8-1.3-.5a7.7 7.7 0 0 1-1.7 1l-.2 1.4h-3.2l-.2-1.4a7.7 7.7 0 0 1-1.7-1l-1.3.5-1.6-2.8 1.1-.8a7 7 0 0 1 0-2.2l-1.1-.8 1.6-2.8 1.3.5a7.7 7.7 0 0 1 1.7-1l.2-1.4h3.2l.2 1.4a7.7 7.7 0 0 1 1.7 1l1.3-.5 1.6 2.8-1.1.8a7 7 0 0 1 0 2.2Z"></path></svg><span>Settings</span></button></div>
+          <div class="library-footer"><span id="flow-count">No saved flows</span><div class="library-footer-actions"><button id="home-button" class="footer-button" type="button" aria-label="Home"><svg class="footer-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m4 11 8-7 8 7"></path><path d="M6.5 10.5v8h11v-8"></path><path d="M10 18.5v-5h4v5"></path></svg><span>Home</span></button><button id="settings-button" class="footer-button settings-button" type="button" aria-label="Settings"><svg class="footer-icon settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"></path><path d="m19.2 13.1 1.1.8-1.6 2.8-1.3-.5a7.7 0 0 1-1.7 1l-.2 1.4h-3.2l-.2-1.4a7.7 0 0 1-1.7-1l-1.3.5-1.6 2.8 1.1-.8a7 0 0 1 0-2.2l-1.1-.8 1.6 2.8 1.3-.5a7.7 0 0 1 1.7-1l.2-1.4h3.2l.2 1.4a7.7 0 0 1 1.7 1l1.3-.5 1.6-2.8-1.1.8a7 0 0 1 0-2.2Z"></path></svg><span>Settings</span></button></div></div>
         </aside>
 
         <section id="authoring-view" class="authoring-view">
@@ -33,7 +80,7 @@
                 <div class="composer-footer"><span id="composer-hint">Please share your flow one branch/step at a time.</span><button id="send-instruction" class="button primary" type="submit">Send</button></div>
               </form>
               <form id="answer-form" class="answer-composer hidden"><div id="question-prompt" class="question-prompt"></div><div id="answer-control"></div><div class="composer-footer answer-footer"><button id="answer-submit" class="button primary" type="submit">Continue</button></div></form>
-              <div id="locked-composer" class="locked-composer hidden"><span aria-hidden="true">🔒</span><span>Flow complete — ready for review</span></div>
+              <div id="locked-composer" class="locked-composer hidden"><svg class="status-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg><span>Flow complete — ready for review</span></div>
             </div>
           </section>
 
@@ -72,7 +119,6 @@
 
       <dialog id="name-dialog" class="dialog"><form id="name-form" method="dialog"><h2>Name your new flow</h2><p>Give it a clear name. You’ll describe the first segment next.</p><label for="flow-name">Flow name</label><input id="flow-name" autocomplete="off" placeholder="For example: Community outreach" required maxlength="200" /><div id="name-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button id="cancel-name" class="button secondary" type="button">Cancel</button><button class="button primary" type="submit">Create flow</button></div></form></dialog>
       <dialog id="settings-dialog" class="dialog"><div><h2>Glific settings</h2><p>The account AutoGlific will publish confirmed flows to.</p><dl id="settings-details" class="settings-details"></dl><div class="dialog-actions"><button id="close-settings" class="button primary" type="button">Done</button></div></div></dialog>
-      <details id="advanced-details" class="advanced-details"><summary>Advanced technical details</summary><pre id="advanced-content"></pre></details>
     </div>
     <!-- Mermaid 11.16.0 (MIT), bundled locally. -->
     <script src="/static/vendor/mermaid-11.16.0.min.js"></script>

@@ -1,4 +1,7 @@
 {
+  "documentation_files": [
+    "README.md"
+  ],
   "excluded": [
     "product3",
     "tests",
