@@ -4,8 +4,13 @@
   let state = null;
   let sessions = [];
   let sessionsLoadGeneration = 0;
+  let flowLoadGeneration = 0;
   let settings = null;
   let sessionsLoading = false;
+  let flowLoading = false;
+  let loadingSessionId = "";
+  let loadingAction = "";
+  let loadingStatus = "";
   let lastError = null;
   let busy = false;
   let generating = false;
@@ -255,7 +260,39 @@
     return pipeline?.all_stages_passed && stage?.status === "passed" && stage?.json ? stage : null;
   }
 
-  function apply(payload, revealClarification = false) {
+  function beginFlowLoading({ sessionId = "", action = "flow", status = "Opening your flow…" } = {}) {
+    flowLoadGeneration += 1;
+    flowLoading = true;
+    loadingSessionId = sessionId;
+    loadingAction = action;
+    loadingStatus = status;
+    state = null;
+    busy = true;
+    workspaceMode = "publishing";
+    processPanel = "conversation";
+    publishingPhase = null;
+    renderedPresentationSource = "";
+    lastError = null;
+    toastVisible = false;
+    clearToastTimer();
+    render();
+    return flowLoadGeneration;
+  }
+
+  function finishFlowLoading() {
+    flowLoading = false;
+    loadingSessionId = "";
+    loadingAction = "";
+    loadingStatus = "";
+    busy = false;
+  }
+
+  function flowLoadingHtml() {
+    return "<div class=\"flow-loading\" role=\"status\" aria-live=\"polite\"><span class=\"spinner flow-loading-spinner\" aria-hidden=\"true\"></span><strong>" + esc(loadingStatus || "Opening your flow…") + "</strong><p>Your saved flow will appear here when it is ready.</p></div>";
+  }
+
+  function apply(payload, revealClarification = false, options = {}) {
+    const requestedPanel = options?.processPanel || "";
     state = payload;
     if (workspaceMode === "landing" && payload?.session) workspaceMode = "authoring";
     lastError = null;
@@ -270,14 +307,25 @@
     threadRevealPending = Boolean(revealClarification);
     if (payload?.glific_publish || (payload?.pipeline && workspaceMode === "authoring")) {
       workspaceMode = "publishing";
-      processPanel = "publishing";
+      processPanel = requestedPanel || processPanel || "publishing";
     }
+    if (requestedPanel) processPanel = requestedPanel;
+    if (flowLoading) finishFlowLoading();
     if (payload?.session?.state !== "frozen") generating = false;
     render();
   }
 
   function fail(error) {
     showToast("error", friendlyError(error));
+    const failedLoadAction = loadingAction;
+    if (flowLoading) {
+      flowLoadGeneration += 1;
+      finishFlowLoading();
+      state = null;
+      workspaceMode = failedLoadAction.startsWith("landing-start") ? "landing" : "authoring";
+      processPanel = "conversation";
+      publishingPhase = null;
+    }
     busy = false;
     render();
   }
@@ -316,9 +364,11 @@
     if (sessionsLoading) list.innerHTML = "<div class=\"library-message\">Loading saved flows…</div>";
     else if (!sessions.length) list.innerHTML = "<div class=\"library-message\">No saved flows yet. Create your first flow to begin.</div>";
     else list.innerHTML = sessions.map((item) => {
-      const active = state?.session?.id === item.id;
+      const loading = flowLoading && loadingSessionId === item.id;
+      const active = state?.session?.id === item.id || loading;
       const keyword = Array.isArray(item.keywords) && item.keywords.length ? " · " + item.keywords[0] : "";
-      return "<button type=\"button\" class=\"flow-item" + (active ? " active" : "") + "\" data-session-id=\"" + esc(item.id) + "\"><strong>" + esc(item.title) + "</strong><span>" + esc(sessionStatus(item) + keyword) + "</span></button>";
+      const status = loading ? "Opening saved flow…" : sessionStatus(item) + keyword;
+      return "<button type=\"button\" class=\"flow-item" + (active ? " active" : "") + "\" data-session-id=\"" + esc(item.id) + "\" aria-current=\"" + String(active) + "\" aria-busy=\"" + String(loading) + "\"" + (flowLoading ? " disabled" : "") + "><strong>" + esc(item.title) + "</strong><span class=\"flow-item-status\">" + (loading ? "<span class=\"spinner\" aria-hidden=\"true\"></span>" : "") + esc(status) + "</span></button>";
     }).join("");
     const savedCount = sessions.length + " saved";
     $("flow-count").textContent = savedCount;
@@ -333,10 +383,20 @@
     $("authoring-view").classList.toggle("hidden", workspaceMode !== "authoring");
     $("review-view").classList.toggle("hidden", workspaceMode !== "review");
     $("process-view").classList.toggle("hidden", workspaceMode !== "publishing");
-    $("flow-title").textContent = state?.session?.title || "Start a new flow";
+    $("flow-title").textContent = flowLoading ? "Opening flow…" : state?.session?.title || "Start a new flow";
     $("save-flow").disabled = !state || busy;
     $("review-flow").disabled = !isReviewReady() || busy;
     $("review-flow").textContent = workspaceMode === "review" ? "Reviewing flow" : "Review flow";
+    $("process-view").setAttribute("aria-busy", String(flowLoading));
+    ["landing-start-hero", "landing-start-closing"].forEach((id) => {
+      const button = $(id);
+      if (!button) return;
+      const active = flowLoading && loadingAction === id;
+      button.disabled = busy || flowLoading;
+      button.setAttribute("aria-busy", String(active));
+      const status = $(id + "-status");
+      if (status) status.textContent = active ? loadingStatus : "";
+    });
   }
 
   function formatValue(value) {
@@ -437,6 +497,7 @@
     }));
   }
   function segmentsHtml() {
+    if (flowLoading) return flowLoadingHtml();
     const entries = segmentEntries();
     if (!entries.length) return "<div class=\"empty-state\"><strong>Your flow statements will appear here</strong></div>";
     return entries.map((entry, index) => "<article class=\"segment" + (entry.current ? " current" : "") + "\"><span class=\"segment-number\">" + (index + 1) + "</span><div><p>" + esc(entry.text) + "</p>" + (entry.current ? "<span class=\"segment-state\">" + esc(entry.status) + "</span>" : "") + "</div></article>").join("");
@@ -444,6 +505,7 @@
   function renderSegments() { $("segment-list").innerHTML = segmentsHtml(); }
 
   function conversationHtml() {
+    if (flowLoading) return flowLoadingHtml();
     if (!state) return chatMessage("assistant", "I’ll help you build one segment at a time, ask for missing details, show the complete journey for review, and publish only after you approve it.", "AutoGlific") + chatMessage("assistant", "What should happen first?", "AutoGlific");
     const session = state.session;
     const turns = conversationTurns();
@@ -802,10 +864,11 @@
   }
   function archiveConversationHtml() { return "<div class=\"archive-layout\"><section class=\"archive-thread\">" + conversationHtml() + "</section><aside class=\"archive-segments\"><h2>Flow Logic</h2><div class=\"segment-list\">" + segmentsHtml() + "</div></aside></div>"; }
   function renderProcessPanel() {
-    if (workspaceMode !== "publishing" || !state) return;
+    if (workspaceMode !== "publishing") return;
     $("process-view").dataset.openPanel = processPanel;
     renderTabState("process-tabs", processPanel, "panel");
     if (processPanel === "conversation") $("process-conversation-body").innerHTML = archiveConversationHtml();
+    else if (!state) return;
     else if (processPanel === "mermaid") { renderedPresentationSource = ""; window.setTimeout(() => renderAuthoredMermaid(presentationMermaidSource(), "process-mermaid-graph"), 0); }
   }
   function render() {
@@ -851,19 +914,40 @@
   async function resumeSessionFromUrl() {
     const params = new URLSearchParams(window.location.search);
     if (!params.has("session")) { workspaceMode = "landing"; state = null; render(); return; }
-    void loadSessions().catch((error) => fail(error));
     const sessionId = (params.get("session") || "").trim();
     if (!sessionId) { const error = new Error("Session does not exist."); error.code = "P4_SESSION_NOT_FOUND"; fail(error); return; }
-    workspaceMode = "authoring";
-    processPanel = "publishing";
-    render();
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = "publishing"; validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, true); }
-    catch (error) { state = null; workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; fail(error); }
+    const generation = beginFlowLoading({ sessionId, action: "resume", status: "Opening your flow…" });
+    void loadSessions().catch(() => {});
+    try {
+      const payload = await request("/api/sessions/" + encodeURIComponent(sessionId));
+      if (generation !== flowLoadGeneration) return;
+      workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring";
+      processPanel = "conversation";
+      validationAutoAnswerKey = "";
+      renderedQuestionKey = "";
+      apply(payload, true, { processPanel: "conversation" });
+    }
+    catch (error) { if (generation === flowLoadGeneration) fail(error); }
   }
-  async function selectSession(sessionId, preferredProcessPanel = "publishing") {
-    if (busy || !sessionId) return;
-    try { const payload = await request("/api/sessions/" + encodeURIComponent(sessionId)); workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring"; processPanel = preferredProcessPanel; window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId)); validationAutoAnswerKey = ""; renderedQuestionKey = ""; apply(payload, true); if (workspaceMode === "publishing" && processPanel !== preferredProcessPanel) { processPanel = preferredProcessPanel; render(); } }
-    catch (error) { fail(error); }
+  async function selectSession(sessionId, preferredProcessPanel = "conversation", existingGeneration = null) {
+    if (!sessionId || (!existingGeneration && (busy || flowLoading))) return;
+    const generation = existingGeneration || beginFlowLoading({ sessionId, action: "saved-flow", status: "Opening saved flow…" });
+    if (existingGeneration) {
+      loadingSessionId = sessionId;
+      loadingStatus = "Opening saved flow…";
+      render();
+    }
+    try {
+      const payload = await request("/api/sessions/" + encodeURIComponent(sessionId));
+      if (generation !== flowLoadGeneration) return;
+      workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring";
+      processPanel = preferredProcessPanel;
+      window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId));
+      validationAutoAnswerKey = "";
+      renderedQuestionKey = "";
+      apply(payload, true, { processPanel: preferredProcessPanel });
+    }
+    catch (error) { if (generation === flowLoadGeneration) fail(error); }
   }
   async function submitInstruction(event) { event.preventDefault(); await submitInstructionText($("instruction").value); }
   async function submitAnswer(event) {
@@ -931,6 +1015,11 @@
     threadRevealPending = false;
     renderedPresentationSource = "";
     mermaidRenderError = null;
+    flowLoadGeneration += 1;
+    flowLoading = false;
+    loadingSessionId = "";
+    loadingAction = "";
+    loadingStatus = "";
     lastError = null;
     toastVisible = false;
     clearToastTimer();
@@ -949,13 +1038,16 @@
     openNameDialog();
     void loadSessions().catch((error) => fail(error));
   }
-  async function startFromLanding() {
-    if (busy) return;
+  async function startFromLanding(source = null) {
+    if (busy || flowLoading) return;
+    const action = typeof source === "string" ? source : source?.currentTarget?.id || "landing-start";
+    const generation = beginFlowLoading({ action, status: "Opening your saved flows…" });
     try {
       await loadSessions();
-      if (!sessions.length) { startNewFlow(); return; }
-      await selectSession(sessions[0].id, "conversation");
-    } catch (error) { fail(error); }
+      if (generation !== flowLoadGeneration) return;
+      if (!sessions.length) { finishFlowLoading(); startNewFlow(); return; }
+      await selectSession(sessions[0].id, "conversation", generation);
+    } catch (error) { if (generation === flowLoadGeneration) fail(error); }
   }
   function openNameDialog() { if (!busy) { $("name-error").textContent = ""; $("name-dialog").showModal(); window.setTimeout(() => $("flow-name").focus(), 0); } }
   async function openSettings() {
@@ -993,6 +1085,8 @@
       segmentEntries,
       archiveConversationHtml,
       renderLibrary,
+      selectSession,
+      getUiState() { return { busy, flowLoading, loadingSessionId, loadingAction, loadingStatus, workspaceMode, processPanel, hasState: Boolean(state) }; },
       setSessions(items) { sessionsLoading = false; sessions = orderSessions(items || []); renderLibrary(); },
     };
   }
