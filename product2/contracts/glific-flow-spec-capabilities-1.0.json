@@ -1,0 +1,32 @@
+{
+  "capability_version": "glific-flow-spec-capabilities-1.0",
+  "target_contract": "glific-import-verified-0.1",
+  "evidence": [
+    "contracts/glific-capabilities-verified-0.1.json",
+    "backend/tests/fixtures/glific_exports/text_and_end.json",
+    "backend/tests/fixtures/glific_exports/interactive_messages.json"
+  ],
+  "nodes": {
+    "send_message": {"enabled_local": true, "compiler_mapping": "send_message"},
+    "send_media": {"enabled_local": false, "compiler_mapping": "send_media", "reason": "No verified media export fixture."},
+    "ask_choice": {"enabled_local": true, "compiler_mapping": "interactive_wait_router", "presentations": ["quick_reply", "list"], "quick_reply_max": 3, "list_max": 10},
+    "ask_input": {"enabled_local": true, "compiler_mapping": "wait_router", "input_types": ["text", "number", "date", "time", "datetime", "email", "phone", "location", "media"]},
+    "evaluate": {"enabled_local": true, "compiler_mapping": "switch"},
+    "call_webhook": {"enabled_local": false, "compiler_mapping": "webhook", "reason": "The pinned Glific capability contract has no verified local round-trip."},
+    "update_contact": {"enabled_local": false, "compiler_mapping": "contact_update", "reason": "No verified contact-field export fixture."},
+    "record_request": {"enabled_local": true, "compiler_mapping": "native_set_contact_field", "mechanisms": ["contact_fields"], "requires_resource": true, "staging_mutation": false, "reason": "Contact-field persistence lowers to official set_contact_field actions; no live Glific mutation is enabled."},
+    "handoff": {"enabled_local": false, "compiler_mapping": "handoff", "reason": "Ticket and staff notification primitives are unverified locally."},
+    "delay": {"enabled_local": false, "compiler_mapping": "delay", "reason": "Wait-for-time is disabled in the pinned capability contract."},
+    "enter_subflow": {"enabled_local": false, "compiler_mapping": "enter_subflow", "reason": "Child-flow primitive is disabled in the pinned capability contract."},
+    "end": {"enabled_local": true, "compiler_mapping": "end"}
+  },
+  "input_parsers": {
+    "plain_text": {"enabled_local": true},
+    "integer": {"enabled_local": true},
+    "local_12_hour_time": {"enabled_local": true, "examples": ["3:30 PM", "11 AM"], "timezone_source": "contact_locale"},
+    "email": {"enabled_local": true},
+    "phone": {"enabled_local": true}
+  },
+  "interactive_limits": {"quick_reply_max": 3, "list_max": 10},
+  "interactive_selection": {"runtime_matcher": "visible_title", "stable_value_lowering": "native_set_run_result"}
+}

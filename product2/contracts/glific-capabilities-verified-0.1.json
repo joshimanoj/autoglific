@@ -1,0 +1,42 @@
+{
+  "contract_version": "glific-import-verified-0.1",
+  "glific_spec_version": "13.1.0",
+  "evidence": [
+    {"class": "official_documentation", "url": "https://glific.github.io/docs/docs/Product%20Features/Flows/Flow%20Actions/Flow%20Actions%20Overview/", "retrieved": "2026-08-03"},
+    {"class": "official_documentation", "url": "https://glific.github.io/docs/docs/Product%20Features/Flows/Flow%20Actions/Wait%20for%20the%20contact%20to%20respond/", "retrieved": "2026-08-03"},
+    {"class": "official_documentation", "url": "https://glific.github.io/docs/docs/Product%20Features/Interactive%20Messages/", "retrieved": "2026-08-03"},
+    {"class": "local_export_fixture", "path": "backend/tests/fixtures/glific_exports/text_and_end.json", "verification": "local_shape_only"},
+    {"class": "local_export_fixture", "path": "backend/tests/fixtures/glific_exports/interactive_messages.json", "verification": "local_shape_only"}
+  ],
+  "primitives": {
+    "send_text_message": {"enabled_local": true, "enabled_staging": true},
+    "wait_for_text_response": {"enabled_local": true, "enabled_staging": true},
+    "exact_categorical_branch": {"enabled_local": true, "enabled_staging": true},
+    "number_branch": {"enabled_local": true, "enabled_staging": true},
+    "flow_result_interpolation": {"enabled_local": true, "enabled_staging": true},
+    "end_terminal": {"enabled_local": true, "enabled_staging": true},
+    "quick_reply": {"enabled_local": true, "enabled_staging": true},
+    "list_message": {"enabled_local": true, "enabled_staging": true},
+    "call_webhook": {"enabled_local": false, "enabled_staging": false, "reason": "No verified local export/round-trip fixture in this Phase 1 checkout."},
+    "set_contact_field": {"enabled_local": true, "enabled_staging": false, "source": "official_glific_action_test"},
+    "set_run_result": {"enabled_local": true, "enabled_staging": false, "source": "official_glific_action_test"},
+    "add_remove_collection": {"enabled_local": false, "enabled_staging": false},
+    "wait_for_time": {"enabled_local": false, "enabled_staging": false},
+    "enter_child_flow": {"enabled_local": false, "enabled_staging": false},
+    "open_ticket": {"enabled_local": false, "enabled_staging": false}
+  },
+  "interactive_limits": {
+    "quick_reply_max_items": 3,
+    "list_max_items": 10
+  },
+  "interactive_selection": {
+    "quick_reply": {
+      "runtime_matcher": "visible_title",
+      "equivalence": "stable_contract_value_is_written_by_native_set_run_result"
+    },
+    "list": {
+      "runtime_matcher": "visible_title",
+      "equivalence": "stable_contract_value_is_written_by_native_set_run_result"
+    }
+  }
+}

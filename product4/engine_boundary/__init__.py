@@ -1,0 +1,1 @@
+"""Deterministic lower-pipeline boundaries."""

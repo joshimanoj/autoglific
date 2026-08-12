@@ -1,0 +1,2174 @@
+{
+  "$defs": {
+    "AcceptanceScenario": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_route_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Expected Route Node Id",
+          "type": "string"
+        },
+        "expected_source_outcomes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Expected Source Outcomes",
+          "type": "array"
+        },
+        "expected_terminal_reason": {
+          "anyOf": [
+            {
+              "maxLength": 180,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Terminal Reason"
+        },
+        "id": {
+          "pattern": "^SC[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 240,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "stimuli": {
+          "items": {
+            "$ref": "#/$defs/ScenarioStimulus"
+          },
+          "title": "Stimuli",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "expected_route_node_id"
+      ],
+      "title": "AcceptanceScenario",
+      "type": "object"
+    },
+    "AskChoiceNode": {
+      "additionalProperties": false,
+      "properties": {
+        "choices": {
+          "items": {
+            "$ref": "#/$defs/FlowSpecChoice"
+          },
+          "maxItems": 100,
+          "minItems": 2,
+          "title": "Choices",
+          "type": "array"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/FlowSpecMessage"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "no_response": {
+          "$ref": "#/$defs/FlowSpecNoResponse"
+        },
+        "presentation": {
+          "enum": [
+            "quick_reply",
+            "list"
+          ],
+          "title": "Presentation",
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/FlowSpecRetry"
+        },
+        "save_as": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Save As",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "ask_choice",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "message",
+        "presentation",
+        "choices",
+        "save_as",
+        "retry",
+        "no_response"
+      ],
+      "title": "AskChoiceNode",
+      "type": "object"
+    },
+    "AskInputNode": {
+      "additionalProperties": false,
+      "properties": {
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "input_type": {
+          "enum": [
+            "text",
+            "number",
+            "date",
+            "time",
+            "datetime",
+            "email",
+            "phone",
+            "location",
+            "media"
+          ],
+          "title": "Input Type",
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/FlowSpecMessage"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "no_response": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlowSpecNoResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "retry": {
+          "$ref": "#/$defs/FlowSpecRetry"
+        },
+        "save_as": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Save As",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "ask_input",
+          "title": "Type",
+          "type": "string"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlowSpecInputValidation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "message",
+        "input_type",
+        "save_as",
+        "validation",
+        "retry",
+        "next_node_id"
+      ],
+      "title": "AskInputNode",
+      "type": "object"
+    },
+    "CallWebhookNode": {
+      "additionalProperties": false,
+      "properties": {
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "call_webhook",
+          "title": "Type",
+          "type": "string"
+        },
+        "webhook": {
+          "$ref": "#/$defs/FlowSpecWebhook"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "webhook"
+      ],
+      "title": "CallWebhookNode",
+      "type": "object"
+    },
+    "DelayNode": {
+      "additionalProperties": false,
+      "properties": {
+        "duration_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Duration Seconds",
+          "type": "integer"
+        },
+        "failure_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Failure Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "timezone": {
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        },
+        "type": {
+          "const": "delay",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "duration_seconds",
+        "timezone",
+        "next_node_id",
+        "failure_node_id"
+      ],
+      "title": "DelayNode",
+      "type": "object"
+    },
+    "EndNode": {
+      "additionalProperties": false,
+      "properties": {
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "end",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "reason"
+      ],
+      "title": "EndNode",
+      "type": "object"
+    },
+    "EnterSubflowNode": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Failure Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "input_mappings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Input Mappings",
+          "type": "object"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "output_mappings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Output Mappings",
+          "type": "object"
+        },
+        "resource_ref": {
+          "minLength": 1,
+          "title": "Resource Ref",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "success_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Success Node Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "enter_subflow",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "resource_ref",
+        "success_node_id",
+        "failure_node_id"
+      ],
+      "title": "EnterSubflowNode",
+      "type": "object"
+    },
+    "EvaluateNode": {
+      "additionalProperties": false,
+      "properties": {
+        "cases": {
+          "items": {
+            "$ref": "#/$defs/FlowSpecEvaluateCase"
+          },
+          "minItems": 1,
+          "title": "Cases",
+          "type": "array"
+        },
+        "default_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Default Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "operand": {
+          "$ref": "#/$defs/FlowSpecEvaluateOperand"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "evaluate",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "operand",
+        "cases",
+        "default_node_id"
+      ],
+      "title": "EvaluateNode",
+      "type": "object"
+    },
+    "FlowSourceRef": {
+      "additionalProperties": false,
+      "properties": {
+        "source_quote": {
+          "minLength": 1,
+          "title": "Source Quote",
+          "type": "string"
+        },
+        "source_unit_id": {
+          "pattern": "^S[0-9]{3,}$",
+          "title": "Source Unit Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_unit_id",
+        "source_quote"
+      ],
+      "title": "FlowSourceRef",
+      "type": "object"
+    },
+    "FlowSpecChoice": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^CH[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "submitted_value": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Submitted Value",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "submitted_value",
+        "next_node_id"
+      ],
+      "title": "FlowSpecChoice",
+      "type": "object"
+    },
+    "FlowSpecEvaluateCase": {
+      "additionalProperties": false,
+      "properties": {
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "operator": {
+          "enum": [
+            "equals",
+            "contains_any",
+            "contains_all",
+            "contains_phrase",
+            "number_equals",
+            "number_between_inclusive",
+            "matches_regex",
+            "is_member",
+            "custom_expression"
+          ],
+          "title": "Operator",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value"
+        }
+      },
+      "required": [
+        "operator",
+        "value",
+        "next_node_id"
+      ],
+      "title": "FlowSpecEvaluateCase",
+      "type": "object"
+    },
+    "FlowSpecEvaluateOperand": {
+      "additionalProperties": false,
+      "properties": {
+        "expression": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expression"
+        },
+        "resource_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resource Ref"
+        },
+        "source": {
+          "enum": [
+            "variable",
+            "contact_field",
+            "webhook_result",
+            "system_expression",
+            "collection_membership"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "variable": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z][a-z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Variable"
+        }
+      },
+      "required": [
+        "source"
+      ],
+      "title": "FlowSpecEvaluateOperand",
+      "type": "object"
+    },
+    "FlowSpecFlow": {
+      "additionalProperties": false,
+      "properties": {
+        "description": {
+          "default": "",
+          "maxLength": 2000,
+          "title": "Description",
+          "type": "string"
+        },
+        "entry_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Entry Node Id",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "title": "Id",
+          "type": "string"
+        },
+        "keywords": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20,
+          "title": "Keywords",
+          "type": "array"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "entry_node_id"
+      ],
+      "title": "FlowSpecFlow",
+      "type": "object"
+    },
+    "FlowSpecInputValidation": {
+      "additionalProperties": false,
+      "properties": {
+        "constraints": {
+          "additionalProperties": true,
+          "title": "Constraints",
+          "type": "object"
+        },
+        "invalid_message": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Invalid Message",
+          "type": "string"
+        },
+        "parser": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Parser",
+          "type": "string"
+        }
+      },
+      "required": [
+        "parser",
+        "invalid_message"
+      ],
+      "title": "FlowSpecInputValidation",
+      "type": "object"
+    },
+    "FlowSpecIntegration": {
+      "additionalProperties": false,
+      "properties": {
+        "auth_ref": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z][A-Z0-9_]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Auth Ref"
+        },
+        "base_url_ref": {
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "title": "Base Url Ref",
+          "type": "string"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "base_url_ref"
+      ],
+      "title": "FlowSpecIntegration",
+      "type": "object"
+    },
+    "FlowSpecMessage": {
+      "additionalProperties": false,
+      "properties": {
+        "locale": {
+          "default": "en",
+          "maxLength": 20,
+          "minLength": 2,
+          "title": "Locale",
+          "type": "string"
+        },
+        "text": {
+          "maxLength": 5000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "variable_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Variable Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "FlowSpecMessage",
+      "type": "object"
+    },
+    "FlowSpecMetadata": {
+      "additionalProperties": false,
+      "description": "Operational-policy pass-through bound to a compiled node/edge.\n\nProduced by Product 3 from the source-flow-0.1 ``metadata`` array and\npreserved as typed data so a runtime/executor can honor retry counts,\nwebhook calls, and escalation without the diagram carrying them.",
+      "properties": {
+        "id": {
+          "pattern": "^M[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Kind",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "source_ref": {
+          "$ref": "#/$defs/FlowSourceRef"
+        },
+        "target_id": {
+          "minLength": 1,
+          "title": "Target Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "default": "node",
+          "enum": [
+            "node",
+            "edge"
+          ],
+          "title": "Target Kind",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "target_id",
+        "source_ref"
+      ],
+      "title": "FlowSpecMetadata",
+      "type": "object"
+    },
+    "FlowSpecNoResponse": {
+      "additionalProperties": false,
+      "properties": {
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeout_seconds",
+        "next_node_id"
+      ],
+      "title": "FlowSpecNoResponse",
+      "type": "object"
+    },
+    "FlowSpecResource": {
+      "additionalProperties": false,
+      "properties": {
+        "binding_state": {
+          "default": "required_at_import",
+          "enum": [
+            "generated_in_package",
+            "existing_bound",
+            "required_at_import"
+          ],
+          "title": "Binding State",
+          "type": "string"
+        },
+        "kind": {
+          "enum": [
+            "contact_field",
+            "collection",
+            "staff_member",
+            "ticket_target",
+            "ticket_label",
+            "child_flow",
+            "hsm_template",
+            "media",
+            "integration_binding"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "logical_name": {
+          "maxLength": 160,
+          "minLength": 1,
+          "title": "Logical Name",
+          "type": "string"
+        },
+        "platform_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Platform Id"
+        }
+      },
+      "required": [
+        "logical_name",
+        "kind"
+      ],
+      "title": "FlowSpecResource",
+      "type": "object"
+    },
+    "FlowSpecResponseMapping": {
+      "additionalProperties": false,
+      "properties": {
+        "json_key": {
+          "minLength": 1,
+          "title": "Json Key",
+          "type": "string"
+        },
+        "variable": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Variable",
+          "type": "string"
+        }
+      },
+      "required": [
+        "json_key",
+        "variable"
+      ],
+      "title": "FlowSpecResponseMapping",
+      "type": "object"
+    },
+    "FlowSpecResponseProperty": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "object",
+            "array",
+            "null"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "FlowSpecResponseProperty",
+      "type": "object"
+    },
+    "FlowSpecResponseSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "properties": {
+          "additionalProperties": {
+            "$ref": "#/$defs/FlowSpecResponseProperty"
+          },
+          "title": "Properties",
+          "type": "object"
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Required",
+          "type": "array"
+        },
+        "type": {
+          "const": "object",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "properties"
+      ],
+      "title": "FlowSpecResponseSchema",
+      "type": "object"
+    },
+    "FlowSpecRetry": {
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Attempts",
+          "type": "integer"
+        },
+        "messages": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 9,
+          "title": "Messages",
+          "type": "array"
+        },
+        "on_exhausted_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "On Exhausted Node Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "max_attempts",
+        "on_exhausted_node_id"
+      ],
+      "title": "FlowSpecRetry",
+      "type": "object"
+    },
+    "FlowSpecSource": {
+      "additionalProperties": false,
+      "properties": {
+        "product1_generation_id": {
+          "minLength": 1,
+          "title": "Product1 Generation Id",
+          "type": "string"
+        },
+        "product1_session_id": {
+          "minLength": 1,
+          "title": "Product1 Session Id",
+          "type": "string"
+        },
+        "source_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Hash",
+          "type": "string"
+        }
+      },
+      "required": [
+        "product1_session_id",
+        "product1_generation_id",
+        "source_hash"
+      ],
+      "title": "FlowSpecSource",
+      "type": "object"
+    },
+    "FlowSpecTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {
+          "minLength": 1,
+          "title": "Contract Version",
+          "type": "string"
+        },
+        "language": {
+          "maxLength": 20,
+          "minLength": 2,
+          "title": "Language",
+          "type": "string"
+        },
+        "platform": {
+          "const": "glific",
+          "title": "Platform",
+          "type": "string"
+        },
+        "timezone": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Timezone",
+          "type": "string"
+        }
+      },
+      "required": [
+        "platform",
+        "contract_version",
+        "language",
+        "timezone"
+      ],
+      "title": "FlowSpecTarget",
+      "type": "object"
+    },
+    "FlowSpecVariable": {
+      "additionalProperties": false,
+      "properties": {
+        "default": {
+          "default": null,
+          "title": "Default"
+        },
+        "display_companion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display Companion"
+        },
+        "name": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "scope": {
+          "default": "flow",
+          "enum": [
+            "flow",
+            "persistent"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "sensitive": {
+          "default": false,
+          "title": "Sensitive",
+          "type": "boolean"
+        },
+        "type": {
+          "enum": [
+            "string",
+            "number",
+            "boolean",
+            "date",
+            "time",
+            "datetime",
+            "email",
+            "phone",
+            "location",
+            "media",
+            "object",
+            "list"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ],
+      "title": "FlowSpecVariable",
+      "type": "object"
+    },
+    "FlowSpecWebhook": {
+      "additionalProperties": false,
+      "properties": {
+        "body": {
+          "default": null,
+          "title": "Body"
+        },
+        "idempotency_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Idempotency Key"
+        },
+        "integration_ref": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Integration Ref",
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "title": "Method",
+          "type": "string"
+        },
+        "mutating": {
+          "default": false,
+          "title": "Mutating",
+          "type": "boolean"
+        },
+        "path": {
+          "maxLength": 1000,
+          "minLength": 1,
+          "title": "Path",
+          "type": "string"
+        },
+        "query": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Query",
+          "type": "object"
+        },
+        "response_mappings": {
+          "items": {
+            "$ref": "#/$defs/FlowSpecResponseMapping"
+          },
+          "title": "Response Mappings",
+          "type": "array"
+        },
+        "response_schema": {
+          "$ref": "#/$defs/FlowSpecResponseSchema"
+        },
+        "routes": {
+          "$ref": "#/$defs/FlowSpecWebhookRoutes"
+        },
+        "timeout_seconds": {
+          "exclusiveMinimum": 0,
+          "maximum": 60,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "integration_ref",
+        "method",
+        "path",
+        "response_schema",
+        "timeout_seconds",
+        "routes"
+      ],
+      "title": "FlowSpecWebhook",
+      "type": "object"
+    },
+    "FlowSpecWebhookRoutes": {
+      "additionalProperties": false,
+      "properties": {
+        "conflict_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conflict Node Id"
+        },
+        "empty_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Empty Node Id"
+        },
+        "http_error_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Http Error Node Id"
+        },
+        "invalid_response_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Invalid Response Node Id"
+        },
+        "not_found_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Not Found Node Id"
+        },
+        "success_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Success Node Id",
+          "type": "string"
+        },
+        "timeout_node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timeout Node Id"
+        }
+      },
+      "required": [
+        "success_node_id"
+      ],
+      "title": "FlowSpecWebhookRoutes",
+      "type": "object"
+    },
+    "HandoffNode": {
+      "additionalProperties": false,
+      "properties": {
+        "context_fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Context Fields",
+          "type": "object"
+        },
+        "exit_automation": {
+          "default": true,
+          "title": "Exit Automation",
+          "type": "boolean"
+        },
+        "failure_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Failure Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "mechanism": {
+          "enum": [
+            "ticket",
+            "staff_notification",
+            "queue_assignment",
+            "instructions_only"
+          ],
+          "title": "Mechanism",
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/FlowSpecMessage"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "resource_refs": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Resource Refs",
+          "type": "array"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "success_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Success Node Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "handoff",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "mechanism",
+        "message",
+        "success_node_id",
+        "failure_node_id"
+      ],
+      "title": "HandoffNode",
+      "type": "object"
+    },
+    "ImplementationDecision": {
+      "additionalProperties": false,
+      "properties": {
+        "answer": {
+          "default": null,
+          "title": "Answer"
+        },
+        "answer_label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Answer Label"
+        },
+        "applied_paths": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Applied Paths",
+          "type": "array"
+        },
+        "category": {
+          "enum": [
+            "option_data_source",
+            "validation_source",
+            "recording_mechanism",
+            "external_integration",
+            "handoff_destination",
+            "persistence_requirement",
+            "business_constraint",
+            "session_template_requirement",
+            "unsupported_behavior_resolution"
+          ],
+          "title": "Category",
+          "type": "string"
+        },
+        "choices": {
+          "items": {
+            "$ref": "#/$defs/ImplementationDecisionChoice"
+          },
+          "maxItems": 10,
+          "title": "Choices",
+          "type": "array"
+        },
+        "depends_on": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "expected_semantic_effect": {
+          "default": "",
+          "maxLength": 500,
+          "title": "Expected Semantic Effect",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^D[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "question": {
+          "maxLength": 500,
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "required": {
+          "default": true,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "category",
+        "question"
+      ],
+      "title": "ImplementationDecision",
+      "type": "object"
+    },
+    "ImplementationDecisionChoice": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "ImplementationDecisionChoice",
+      "type": "object"
+    },
+    "RecordRequestNode": {
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Fields",
+          "type": "object"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "mechanism": {
+          "enum": [
+            "ticket",
+            "contact_fields",
+            "collection_and_contact_fields",
+            "webhook"
+          ],
+          "title": "Mechanism",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "resource_ref": {
+          "minLength": 1,
+          "title": "Resource Ref",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "success_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Success Node Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "record_request",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "mechanism",
+        "fields",
+        "resource_ref",
+        "success_node_id"
+      ],
+      "title": "RecordRequestNode",
+      "type": "object"
+    },
+    "ScenarioStimulus": {
+      "additionalProperties": false,
+      "properties": {
+        "fixture": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fixture"
+        },
+        "node_id": {
+          "anyOf": [
+            {
+              "pattern": "^F[0-9]{3,}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Node Id"
+        },
+        "type": {
+          "enum": [
+            "select_visible_choice",
+            "enter_text",
+            "enter_invalid_text",
+            "no_response",
+            "webhook_fixture",
+            "recording_fixture",
+            "contact_state"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "visible_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Visible Title"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "ScenarioStimulus",
+      "type": "object"
+    },
+    "SemanticReferenceIds": {
+      "additionalProperties": false,
+      "properties": {
+        "edge_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Edge Ids",
+          "type": "array"
+        },
+        "node_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Node Ids",
+          "type": "array"
+        }
+      },
+      "title": "SemanticReferenceIds",
+      "type": "object"
+    },
+    "SendMediaNode": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlowSpecMessage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "content_type": {
+          "enum": [
+            "image",
+            "video",
+            "audio",
+            "document"
+          ],
+          "title": "Content Type",
+          "type": "string"
+        },
+        "failure_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Failure Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "resource_ref": {
+          "minLength": 1,
+          "title": "Resource Ref",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "send_media",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "resource_ref",
+        "content_type",
+        "next_node_id",
+        "failure_node_id"
+      ],
+      "title": "SendMediaNode",
+      "type": "object"
+    },
+    "SendMessageNode": {
+      "additionalProperties": false,
+      "properties": {
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "message": {
+          "$ref": "#/$defs/FlowSpecMessage"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "next_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Next Node Id",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "type": {
+          "const": "send_message",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "message",
+        "next_node_id"
+      ],
+      "title": "SendMessageNode",
+      "type": "object"
+    },
+    "SourceCoverageEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "flow_node_ids": {
+          "items": {
+            "pattern": "^F[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Flow Node Ids",
+          "type": "array"
+        },
+        "rationale": {
+          "minLength": 1,
+          "title": "Rationale",
+          "type": "string"
+        },
+        "semantic_requirement_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Semantic Requirement Ids",
+          "type": "array"
+        },
+        "source_quote": {
+          "minLength": 1,
+          "title": "Source Quote",
+          "type": "string"
+        },
+        "source_unit_id": {
+          "pattern": "^S[0-9]{3,}$",
+          "title": "Source Unit Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "covered",
+            "informational",
+            "blocked"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_unit_id",
+        "source_quote",
+        "status",
+        "rationale"
+      ],
+      "title": "SourceCoverageEntry",
+      "type": "object"
+    },
+    "UpdateContactNode": {
+      "additionalProperties": false,
+      "properties": {
+        "failure_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Failure Node Id",
+          "type": "string"
+        },
+        "generated_from_decision_ids": {
+          "items": {
+            "pattern": "^D[0-9]{3,}$",
+            "type": "string"
+          },
+          "title": "Generated From Decision Ids",
+          "type": "array"
+        },
+        "id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "maxLength": 200,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "overwrite_policy": {
+          "enum": [
+            "always",
+            "if_empty",
+            "never"
+          ],
+          "title": "Overwrite Policy",
+          "type": "string"
+        },
+        "resource_ref": {
+          "minLength": 1,
+          "title": "Resource Ref",
+          "type": "string"
+        },
+        "semantic_reference_ids": {
+          "$ref": "#/$defs/SemanticReferenceIds"
+        },
+        "source_refs": {
+          "items": {
+            "$ref": "#/$defs/FlowSourceRef"
+          },
+          "title": "Source Refs",
+          "type": "array"
+        },
+        "source_variable": {
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Source Variable",
+          "type": "string"
+        },
+        "success_node_id": {
+          "pattern": "^F[0-9]{3,}$",
+          "title": "Success Node Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "update_contact",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "name",
+        "resource_ref",
+        "source_variable",
+        "overwrite_policy",
+        "success_node_id",
+        "failure_node_id"
+      ],
+      "title": "UpdateContactNode",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "acceptance_scenarios": {
+      "items": {
+        "$ref": "#/$defs/AcceptanceScenario"
+      },
+      "title": "Acceptance Scenarios",
+      "type": "array"
+    },
+    "flow": {
+      "$ref": "#/$defs/FlowSpecFlow"
+    },
+    "implementation_decisions": {
+      "items": {
+        "$ref": "#/$defs/ImplementationDecision"
+      },
+      "title": "Implementation Decisions",
+      "type": "array"
+    },
+    "integrations": {
+      "items": {
+        "$ref": "#/$defs/FlowSpecIntegration"
+      },
+      "title": "Integrations",
+      "type": "array"
+    },
+    "metadata": {
+      "items": {
+        "$ref": "#/$defs/FlowSpecMetadata"
+      },
+      "title": "Metadata",
+      "type": "array"
+    },
+    "nodes": {
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "ask_choice": "#/$defs/AskChoiceNode",
+            "ask_input": "#/$defs/AskInputNode",
+            "call_webhook": "#/$defs/CallWebhookNode",
+            "delay": "#/$defs/DelayNode",
+            "end": "#/$defs/EndNode",
+            "enter_subflow": "#/$defs/EnterSubflowNode",
+            "evaluate": "#/$defs/EvaluateNode",
+            "handoff": "#/$defs/HandoffNode",
+            "record_request": "#/$defs/RecordRequestNode",
+            "send_media": "#/$defs/SendMediaNode",
+            "send_message": "#/$defs/SendMessageNode",
+            "update_contact": "#/$defs/UpdateContactNode"
+          },
+          "propertyName": "type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/SendMessageNode"
+          },
+          {
+            "$ref": "#/$defs/SendMediaNode"
+          },
+          {
+            "$ref": "#/$defs/AskChoiceNode"
+          },
+          {
+            "$ref": "#/$defs/AskInputNode"
+          },
+          {
+            "$ref": "#/$defs/EvaluateNode"
+          },
+          {
+            "$ref": "#/$defs/CallWebhookNode"
+          },
+          {
+            "$ref": "#/$defs/UpdateContactNode"
+          },
+          {
+            "$ref": "#/$defs/RecordRequestNode"
+          },
+          {
+            "$ref": "#/$defs/HandoffNode"
+          },
+          {
+            "$ref": "#/$defs/DelayNode"
+          },
+          {
+            "$ref": "#/$defs/EnterSubflowNode"
+          },
+          {
+            "$ref": "#/$defs/EndNode"
+          }
+        ]
+      },
+      "minItems": 1,
+      "title": "Nodes",
+      "type": "array"
+    },
+    "resources": {
+      "items": {
+        "$ref": "#/$defs/FlowSpecResource"
+      },
+      "title": "Resources",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "glific-flow-spec-1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source": {
+      "$ref": "#/$defs/FlowSpecSource"
+    },
+    "source_coverage": {
+      "items": {
+        "$ref": "#/$defs/SourceCoverageEntry"
+      },
+      "title": "Source Coverage",
+      "type": "array"
+    },
+    "target": {
+      "$ref": "#/$defs/FlowSpecTarget"
+    },
+    "variables": {
+      "items": {
+        "$ref": "#/$defs/FlowSpecVariable"
+      },
+      "title": "Variables",
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "source",
+    "target",
+    "flow",
+    "nodes"
+  ],
+  "title": "GlificFlowSpec",
+  "type": "object"
+}

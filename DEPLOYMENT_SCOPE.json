@@ -1,0 +1,37 @@
+{
+  "excluded": [
+    "product3",
+    "tests",
+    "completed",
+    "manual-upload",
+    ".workbench-data",
+    "credentials",
+    "caches"
+  ],
+  "product2_runtime_files": [
+    "backend/app/__init__.py",
+    "backend/app/config.py",
+    "backend/app/contracts.py",
+    "backend/app/flow_spec/__init__.py",
+    "backend/app/flow_spec/capabilities.py",
+    "backend/app/flow_spec/contracts.py",
+    "backend/app/flow_spec/validation.py",
+    "backend/app/glific/__init__.py",
+    "backend/app/glific/capabilities.py",
+    "backend/app/glific/compiler.py",
+    "contracts/glific-flow-spec-1.0.schema.json",
+    "contracts/glific-flow-spec-capabilities-1.0.json",
+    "contracts/glific-capabilities-verified-0.1.json"
+  ],
+  "product4_root": "product4",
+  "product4_runtime_directories": [
+    "authoring",
+    "capabilities",
+    "contracts",
+    "engine_boundary",
+    "workbench"
+  ],
+  "product4_runtime_files": [
+    "__init__.py"
+  ]
+}

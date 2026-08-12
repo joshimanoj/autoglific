@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoGlific — Build Glific flows in natural language</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app" data-view="authoring">
+      <header class="masthead">
+        <div class="brand"><span class="brand-mark" aria-hidden="true"><svg class="brand-icon" viewBox="0 0 24 24" focusable="false"><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="7" r="2.5"></circle><circle cx="12" cy="18" r="2.5"></circle><path d="M8.4 6.2l7.1.6M7.4 8.1l3.4 7.6M16.7 9.2l-3.4 6.5"></path></svg></span><div><strong>AutoGlific</strong><span>Build Glific flows in natural language</span></div></div><div id="alerts" class="alerts" aria-live="assertive"></div>
+      </header>
+
+      <main class="workspace">
+        <aside class="library" aria-label="Saved flows">
+          <div class="library-top"><button id="new-flow" class="button primary new-flow" type="button">+ New flow</button></div>
+          <div class="library-heading"><span class="section-label">Your flows</span><span id="flow-count-display">0 saved</span></div>
+          <nav id="flow-list" class="flow-list" aria-label="Your flows"></nav>
+          <div class="library-footer"><span id="flow-count">No saved flows</span><button id="settings-button" class="settings-button" type="button" aria-label="Settings"><svg class="settings-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"></path><path d="m19.2 13.1 1.1.8-1.6 2.8-1.3-.5a7.7 7.7 0 0 1-1.7 1l-.2 1.4h-3.2l-.2-1.4a7.7 7.7 0 0 1-1.7-1l-1.3.5-1.6-2.8 1.1-.8a7 7 0 0 1 0-2.2l-1.1-.8 1.6-2.8 1.3.5a7.7 7.7 0 0 1 1.7-1l.2-1.4h3.2l.2 1.4a7.7 7.7 0 0 1 1.7 1l1.3-.5 1.6 2.8-1.1.8a7 7 0 0 1 0 2.2Z"></path></svg><span>Settings</span></button></div>
+        </aside>
+
+        <section id="authoring-view" class="authoring-view">
+          <section class="conversation" aria-label="Flow conversation">
+            <header class="conversation-header">
+              <div><h1 id="flow-title">Start a new flow</h1></div>
+              <div class="header-actions"><button id="save-flow" class="button secondary" type="button" disabled>Save flow</button><button id="review-flow" class="button primary" type="button" disabled>Review flow</button></div>
+            </header>
+            <div id="thread" class="thread" aria-live="polite"></div>
+            <div id="composer-shell" class="composer-shell">
+              <form id="instruction-form" class="composer">
+                <textarea id="instruction" rows="3" placeholder="Describe what should happen next…" aria-label="Message AutoGlific"></textarea>
+                <div class="composer-footer"><span id="composer-hint">Please share your flow one branch/step at a time.</span><button id="send-instruction" class="button primary" type="submit">Send</button></div>
+              </form>
+              <form id="answer-form" class="answer-composer hidden"><div id="question-prompt" class="question-prompt"></div><div id="answer-control"></div><div class="composer-footer answer-footer"><button id="answer-submit" class="button primary" type="submit">Continue</button></div></form>
+              <div id="locked-composer" class="locked-composer hidden"><span aria-hidden="true">🔒</span><span>Flow complete — ready for review</span></div>
+            </div>
+          </section>
+
+          <aside class="segments" aria-label="User segments">
+            <header><h2>Your segments</h2><p>The latest segment is highlighted</p></header>
+            <div id="segment-list" class="segment-list"></div>
+          </aside>
+        </section>
+
+        <section id="review-view" class="stage-view review-view hidden" aria-label="Review flow">
+          <section class="review-surface">
+            <header class="stage-header"><div><h1 id="review-title">Review flow</h1><p>Check the complete journey before anything is generated or published</p></div><div class="header-actions"><button id="modify-flow" class="button secondary" type="button">Modify</button><button id="confirm-flow" class="button primary" type="button">Confirm flow</button></div></header>
+            <nav id="review-tabs" class="panel-tabs" role="tablist" aria-label="Review panels">
+              <button id="review-tab-conversation" class="panel-tab" type="button" role="tab" aria-selected="false" aria-controls="review-conversation-panel" tabindex="-1" data-review-panel="conversation">Logic</button>
+              <button id="review-tab-mermaid" class="panel-tab" type="button" role="tab" aria-selected="true" aria-controls="review-mermaid-panel" tabindex="0" data-review-panel="mermaid">Flowchart</button>
+            </nav>
+            <section id="review-conversation-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="review-tab-conversation"><header class="stage-header"><div><h1>Logic</h1><p>The complete user flow step by step</p></div></header><div id="review-conversation-body" class="archive-body"></div></section>
+            <section id="review-mermaid-panel" class="tab-panel" role="tabpanel" aria-labelledby="review-tab-mermaid"><header class="stage-header"><div><h1>Flowchart</h1><p>A visual overview of your complete flow.</p></div></header><div class="graph-area"><div id="graph-meta" class="graph-meta"></div><div id="review-graph" class="mermaid-canvas" role="img" aria-label="Connected flow graph"></div></div></section>
+          </section>
+        </section>
+
+        <section id="process-view" class="stage-view process-view hidden" data-open-panel="publishing" aria-label="Publishing workspace">
+          <nav id="process-tabs" class="panel-tabs" role="tablist" aria-label="Flow workspace panels">
+            <button id="process-tab-conversation" class="panel-tab" type="button" role="tab" aria-selected="false" aria-controls="process-conversation-panel" tabindex="-1" data-panel="conversation">Logic</button>
+            <button id="process-tab-mermaid" class="panel-tab" type="button" role="tab" aria-selected="false" aria-controls="process-mermaid-panel" tabindex="-1" data-panel="mermaid">Flowchart</button>
+            <button id="process-tab-publishing" class="panel-tab" type="button" role="tab" aria-selected="true" aria-controls="publishing-panel" tabindex="0" data-panel="publishing">Publish</button>
+          </nav>
+          <section id="process-conversation-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="process-tab-conversation"><header class="stage-header"><div><h1>Logic</h1><p>The complete user flow step by step</p></div></header><div id="process-conversation-body" class="archive-body"></div></section>
+          <section id="process-mermaid-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="process-tab-mermaid"><header class="stage-header"><div><h1>Flowchart</h1><p>A visual overview of your complete flow.</p></div></header><div id="process-mermaid-body" class="graph-area"><div id="process-mermaid-graph" class="mermaid-canvas" role="img" aria-label="Rendered authored flow graph"></div></div></section>
+          <section id="publishing-panel" class="tab-panel publishing-panel" role="tabpanel" aria-labelledby="process-tab-publishing">
+            <header class="stage-header"><div><h1 id="publishing-title">Status</h1><p>Publishing status of your confirmed pipeline.</p></div></header>
+            <div class="pipeline-body"><div class="pipeline-inner"><div id="pipeline-steps" class="pipeline-steps"></div><button id="pipeline-retry" class="button secondary hidden" type="button">Retry pipeline</button><button id="publication-retry" class="button secondary hidden" type="button">Retry publication</button><section id="published-card" class="published-card hidden"><h3 id="published-heading">Flow published</h3><p id="published-detail"></p><div class="published-actions"><button id="download-json" class="button secondary" type="button">Download final JSON</button><button id="download-mermaid" class="button secondary" type="button">Download Mermaid graph</button><a id="open-whatsapp" class="button primary" target="_blank" rel="noreferrer">Open flow in WhatsApp ↗</a></div></section></div></div>
+          </section>
+        </section>
+      </main>
+
+      <dialog id="name-dialog" class="dialog"><form id="name-form" method="dialog"><h2>Name your new flow</h2><p>Give it a clear name. You’ll describe the first segment next.</p><label for="flow-name">Flow name</label><input id="flow-name" autocomplete="off" placeholder="For example: Community outreach" required maxlength="200" /><div id="name-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button id="cancel-name" class="button secondary" type="button">Cancel</button><button class="button primary" type="submit">Create flow</button></div></form></dialog>
+      <dialog id="settings-dialog" class="dialog"><div><h2>Glific settings</h2><p>The account AutoGlific will publish confirmed flows to.</p><dl id="settings-details" class="settings-details"></dl><div class="dialog-actions"><button id="close-settings" class="button primary" type="button">Done</button></div></div></dialog>
+      <details id="advanced-details" class="advanced-details"><summary>Advanced technical details</summary><pre id="advanced-content"></pre></details>
+    </div>
+    <!-- Mermaid 11.16.0 (MIT), bundled locally. -->
+    <script src="/static/vendor/mermaid-11.16.0.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
