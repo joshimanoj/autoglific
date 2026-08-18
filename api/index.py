@@ -422,6 +422,12 @@ def _handle_post(
             "publish": app.publish,
         }
         action = parts[3]
+        if action == "delete":
+            try:
+                app.require_csrf(headers, cookies)
+            except AuthError as exc:
+                raise _auth_error(exc) from exc
+            return _json_response(app.delete(parts[2], body, owner_id))
         if action not in actions:
             raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", 404)
         try:
@@ -432,11 +438,35 @@ def _handle_post(
     raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", 404)
 
 
+def _handle_delete(
+    app: WorkbenchApp,
+    path: str,
+    body: dict[str, Any],
+    *,
+    headers: Mapping[str, str] | None = None,
+    cookies: Mapping[str, str] | None = None,
+    principal: Principal | None = None,
+) -> Response:
+    _runtime()
+    headers = headers or {}
+    cookies = cookies or {}
+    principal = _require_principal(app, headers, cookies, principal)
+    owner_id = principal.user_id if not app.test_mode else None
+    parts = _path_parts(path)
+    if len(parts) != 3 or parts[:2] != ["api", "sessions"]:
+        raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", 404)
+    try:
+        app.require_csrf(headers, cookies)
+    except AuthError as exc:
+        raise _auth_error(exc) from exc
+    return _json_response(app.delete(parts[2], body, owner_id))
+
+
 if FastAPI is not None:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
     workbench_app: Any | None = None
 
-    @app.api_route("/{path:path}", methods=["GET", "POST"])
+    @app.api_route("/{path:path}", methods=["GET", "POST", "DELETE"])
     async def workbench_route(request: Request, path: str) -> Response:
         global workbench_app, _REQUEST_TIMINGS
         _REQUEST_TIMINGS = []
@@ -470,6 +500,14 @@ if FastAPI is not None:
                 response = _handle_get(
                     workbench_app,
                     normalized,
+                    headers=headers,
+                    cookies=cookies,
+                )
+            elif request.method == "DELETE":
+                response = _handle_delete(
+                    workbench_app,
+                    normalized,
+                    _decode_body(await request.body()),
                     headers=headers,
                     cookies=cookies,
                 )

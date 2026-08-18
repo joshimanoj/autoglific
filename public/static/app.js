@@ -54,6 +54,9 @@
   let accountMenuOpen = false;
   let logoutInProgress = false;
   let logoutGeneration = 0;
+  let deleteCandidateId = "";
+  let deleteInProgress = false;
+  let deleteFlowError = "";
   let wizardStep = 1;
   let setupShownForUser = "";
   const flowMemoryCache = new Map();
@@ -395,6 +398,22 @@
     toastVisible = false;
     clearToastTimer();
     renderAlerts();
+  }
+
+  function renderDeleteDialog() {
+    const dialog = $("delete-flow-dialog");
+    const candidate = sessions.find((item) => item.id === deleteCandidateId);
+    const title = $("delete-flow-title");
+    const error = $("delete-flow-error");
+    const confirm = $("confirm-delete-flow");
+    if (title) title.textContent = candidate ? "Delete “" + String(candidate.title || candidate.id) + "”?" : "Delete flow?";
+    if (error) error.textContent = deleteFlowError;
+    if (confirm) {
+      confirm.disabled = !candidate || deleteInProgress;
+      confirm.textContent = deleteInProgress ? "Deleting…" : "Delete flow";
+      confirm.setAttribute("aria-busy", String(deleteInProgress));
+    }
+    if (dialog) dialog.setAttribute("aria-busy", String(deleteInProgress));
   }
 
   function showStartupError(error) {
@@ -825,7 +844,8 @@
       const active = state?.session?.id === item.id || loading;
       const keyword = Array.isArray(item.keywords) && item.keywords.length ? " · " + item.keywords[0] : "";
       const status = loading ? "Opening saved flow…" : sessionStatus(item) + (item.shared ? "" : keyword);
-      return "<button type=\"button\" class=\"flow-item" + (active ? " active" : "") + (item.shared ? " shared" : "") + "\" data-session-id=\"" + esc(item.id) + "\" aria-current=\"" + String(active) + "\" aria-busy=\"" + String(loading) + "\"" + (flowLoading ? " disabled" : "") + "><strong>" + esc(item.title) + "</strong><span class=\"flow-item-status\">" + (loading ? "<span class=\"spinner\" aria-hidden=\"true\"></span>" : "") + esc(status) + "</span></button>";
+      const deleteButton = item.shared || item.read_only || !authenticated ? "" : "<button type=\"button\" class=\"flow-delete\" data-delete-session-id=\"" + esc(item.id) + "\" aria-label=\"Delete " + esc(item.title) + "\"" + (flowLoading || deleteInProgress ? " disabled" : "") + ">Delete</button>";
+      return "<div class=\"flow-item-row\"><button type=\"button\" class=\"flow-item" + (active ? " active" : "") + (item.shared ? " shared" : "") + "\" data-session-id=\"" + esc(item.id) + "\" aria-current=\"" + String(active) + "\" aria-busy=\"" + String(loading) + "\"" + (flowLoading || deleteInProgress ? " disabled" : "") + "><strong>" + esc(item.title) + "</strong><span class=\"flow-item-status\">" + (loading ? "<span class=\"spinner\" aria-hidden=\"true\"></span>" : "") + esc(status) + "</span></button>" + deleteButton + "</div>";
     }).join("");
     const savedCount = sessions.length + " saved";
     $("flow-count").textContent = savedCount;
@@ -1392,7 +1412,7 @@
     else if (processPanel === "mermaid") { renderedPresentationSource = ""; window.setTimeout(() => renderAuthoredMermaid(presentationMermaidSource(), "process-mermaid-graph"), 0); }
   }
   function render() {
-    renderAlerts(); renderLibrary(); renderShell(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing();
+    renderAlerts(); renderLibrary(); renderShell(); renderDeleteDialog(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing();
     if (!threadRevealPending) return;
     threadRevealPending = false;
     const revealKey = clarificationRevealKey;
@@ -1472,6 +1492,68 @@
     setBusy(true);
     try { const payload = await request("/api/sessions", { method: "POST", body: JSON.stringify({ session_id: "flow-" + suffix, title, reset: true }) }); workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; $("name-dialog").close(); titleInput.value = ""; $("name-error").textContent = ""; busy = false; window.history.replaceState({}, "", "?session=" + encodeURIComponent(payload.session.id)); apply(payload); void loadSessions(); window.setTimeout(() => $("instruction").focus(), 0); }
     catch (error) { fail(error); }
+  }
+  function openDeleteDialog(sessionId) {
+    if (busy || deleteInProgress || !authenticated) return;
+    const candidate = sessions.find((item) => item.id === sessionId);
+    if (!candidate || candidate.shared || candidate.read_only) return;
+    closeAccountMenu();
+    deleteCandidateId = sessionId;
+    deleteFlowError = "";
+    renderDeleteDialog();
+    const dialog = $("delete-flow-dialog");
+    if (dialog?.showModal) dialog.showModal();
+    window.setTimeout(() => $("cancel-delete-flow")?.focus(), 0);
+  }
+  function cancelDeleteFlow() {
+    if (deleteInProgress) return;
+    $("delete-flow-dialog")?.close();
+    deleteCandidateId = "";
+    deleteFlowError = "";
+    renderDeleteDialog();
+  }
+  async function confirmDeleteFlow(event) {
+    event?.preventDefault?.();
+    if (deleteInProgress || !deleteCandidateId) return;
+    const sessionId = deleteCandidateId;
+    const candidate = sessions.find((item) => item.id === sessionId);
+    if (!candidate || candidate.shared || candidate.read_only) return;
+    let expectedRevision = state?.session?.id === sessionId ? state.session.revision : candidate.revision;
+    deleteInProgress = true;
+    deleteFlowError = "";
+    render();
+    try {
+      if (!Number.isInteger(expectedRevision)) {
+        const current = await requestFlowPayload(sessionId);
+        expectedRevision = current?.session?.revision;
+      }
+      if (!Number.isInteger(expectedRevision)) throw new Error("The flow revision is unavailable.");
+      await request("/api/sessions/" + encodeURIComponent(sessionId) + "/delete", {
+        method: "POST",
+        body: JSON.stringify({ revision: expectedRevision }),
+      });
+      flowMemoryCache.delete(flowCacheKey(sessionId));
+      try { sessionStorageOrNull()?.removeItem(storageCacheKey("flow", currentCacheNamespace(), sessionId)); } catch (_error) {}
+      sessions = sessions.filter((item) => item.id !== sessionId);
+      invalidateLibraryCache();
+      deleteInProgress = false;
+      deleteFlowError = "";
+      deleteCandidateId = "";
+      $("delete-flow-dialog")?.close();
+      if (state?.session?.id === sessionId) {
+        stopGlificStatusPolling();
+        resetActiveView();
+        lastSelectedSessionId = "";
+        workspaceMode = authenticated ? "authoring" : "landing";
+        window.history.replaceState({}, "", window.location.pathname || "/");
+      }
+      render();
+      void loadSessions().catch((error) => fail(error));
+    } catch (error) {
+      deleteInProgress = false;
+      deleteFlowError = friendlyError(error).message;
+      render();
+    }
   }
   function requestedSessionFromUrl() {
     return (new URLSearchParams(window.location.search).get("session") || "").trim();
@@ -2056,6 +2138,9 @@
       setTestFlags({ busy: nextBusy = false, glificPublishing: nextPublishing = false } = {}) { busy = nextBusy; glificPublishing = nextPublishing; },
       startNewFlow,
       startFromLanding,
+      openDeleteDialog,
+      cancelDeleteFlow,
+      confirmDeleteFlow,
       openSettings,
       showAuth,
       submitAuth,
@@ -2091,12 +2176,23 @@
     };
   }
 
-  $("flow-list").addEventListener("click", (event) => { const button = event.target.closest("[data-session-id]"); if (button) void selectSession(button.dataset.sessionId); });
+  $("flow-list").addEventListener("click", (event) => {
+    const deleteButton = event.target.closest("[data-delete-session-id]");
+    if (deleteButton) { event.preventDefault(); event.stopPropagation(); openDeleteDialog(deleteButton.dataset.deleteSessionId); return; }
+    const button = event.target.closest("[data-session-id]");
+    if (button) void selectSession(button.dataset.sessionId);
+  });
   $("landing-start-hero").addEventListener("click", startFromLanding);
   $("landing-start-closing").addEventListener("click", startFromLanding);
   $("new-flow").addEventListener("click", openNameDialog);
   $("name-form").addEventListener("submit", createFlow);
   $("cancel-name").addEventListener("click", () => $("name-dialog").close());
+  $("delete-flow-form")?.addEventListener("submit", confirmDeleteFlow);
+  $("cancel-delete-flow")?.addEventListener("click", cancelDeleteFlow);
+  $("delete-flow-dialog")?.addEventListener("cancel", (event) => {
+    if (deleteInProgress) { event.preventDefault(); return; }
+    cancelDeleteFlow();
+  });
   $("home-button").addEventListener("click", goHome);
   $("account-menu-trigger")?.addEventListener("click", toggleAccountMenu);
   $("account-menu-panel")?.addEventListener("keydown", moveAccountMenuFocus);

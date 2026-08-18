@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import shutil
 import tempfile
 import threading
 import time
@@ -83,6 +84,18 @@ class StorageBackend:
         expected_generation: int | str | None = None,
         owner_id: str | None = None,
     ) -> None:
+        raise NotImplementedError
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        expected_generation: int | str | None = None,
+        owner_id: str | None = None,
+    ) -> None:
+        """Delete a flow and every dependent artifact atomically."""
+
         raise NotImplementedError
 
     def load_document(
@@ -404,6 +417,93 @@ class FilesystemStorage(StorageBackend):
                 if str(exc) == "P4_REVISION_CONFLICT":
                     raise StorageRevisionConflict() from exc
                 raise
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        expected_generation: int | str | None = None,
+        owner_id: str | None = None,
+    ) -> None:
+        """Delete a private flow and its derived artifacts as one local operation.
+
+        Files are first moved into a private, per-operation staging directory
+        while the storage lock is held.  This keeps a concurrent request from
+        observing a half-deleted flow and gives us a rollback path if a move
+        fails.  The staged directory is removed only after every source has
+        been detached successfully.
+        """
+
+        if not session_id or Path(session_id).name != session_id:
+            raise StorageError("P4_SESSION_ID_INVALID", "Session id is invalid.")
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise StorageRevisionConflict("Flow deletion requires the current revision.")
+        with _filesystem_state_lock:
+            session_path = self.session_path(session_id, owner_id)
+            # Validate both ownership and the caller's current revision before
+            # moving anything.  A wrong owner resolves to its own scope and
+            # therefore cannot reach another account's files.
+            current, current_generation = self.load_session_with_token(session_id, owner_id)
+            if (
+                current.revision != expected_revision
+                or (
+                    expected_generation is not None
+                    and current_generation != expected_generation
+                )
+            ):
+                raise StorageRevisionConflict("Flow changed before deletion started.")
+            key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
+            with _filesystem_lease_lock:
+                lease = _filesystem_leases.get(key)
+                if lease is not None and lease[1] > time.monotonic():
+                    raise PublishLeaseBusy()
+
+            artifacts_root = self._root(self.artifacts_root, owner_id)
+            targets = [
+                (session_path, Path("session.json")),
+                (self.document_path(session_id, "confirmation", owner_id), Path("confirmation.json")),
+                (self.document_path(session_id, "glific_result", owner_id), Path("glific_result.json")),
+                (artifacts_root / session_id, Path("artifacts")),
+            ]
+            existing = [(source, staged) for source, staged in targets if source.exists()]
+            if not existing:
+                raise StorageNotFound("Session does not exist.")
+            staging_parent = self.data_root / ".deleting"
+            staging_parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(tempfile.mkdtemp(prefix=f"{session_id}-", dir=staging_parent))
+            moved: list[tuple[Path, Path]] = []
+            try:
+                for source, staged in existing:
+                    destination = staging / staged
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(source, destination)
+                    moved.append((source, destination))
+                shutil.rmtree(staging)
+            except Exception as exc:
+                # Put any moved path back in reverse order so an interrupted
+                # deletion leaves the flow usable and visible.
+                for source, destination in reversed(moved):
+                    try:
+                        source.parent.mkdir(parents=True, exist_ok=True)
+                        os.replace(destination, source)
+                    except OSError:
+                        pass
+                try:
+                    shutil.rmtree(staging)
+                except OSError:
+                    pass
+                raise StorageError(
+                    "P4_FLOW_DELETE_FAILED",
+                    "The flow could not be deleted safely.",
+                ) from exc
+            finally:
+                try:
+                    staging_parent.rmdir()
+                except OSError:
+                    pass
+            with _filesystem_lease_lock:
+                _filesystem_leases.pop(key, None)
 
     def load_document(
         self, session_id: str, kind: str, owner_id: str | None = None
@@ -1034,6 +1134,70 @@ class NeonStorage(StorageBackend):
                 )
             if cursor.rowcount != 1:
                 raise StorageRevisionConflict()
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        expected_generation: int | str | None = None,
+        owner_id: str | None = None,
+    ) -> None:
+        """Delete a flow and all dependent rows in the current transaction."""
+
+        if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+            raise StorageRevisionConflict("Flow deletion requires the current revision.")
+        with self._safe_connection() as connection, connection.cursor() as cursor:
+            query = """
+                SELECT revision, row_generation
+                FROM product4_sessions
+                WHERE session_id = %s
+            """
+            params: tuple[Any, ...] = (session_id,)
+            if owner_id is not None:
+                query += " AND owner_id = %s"
+                params += (owner_id,)
+            query += " FOR UPDATE"
+            cursor.execute(query, params)
+            row = cursor.fetchone()
+            if row is None:
+                raise StorageNotFound("Session does not exist.")
+            if (
+                row[0] != expected_revision
+                or (
+                    expected_generation is not None
+                    and row[1] != expected_generation
+                )
+            ):
+                raise StorageRevisionConflict("Flow changed before deletion started.")
+            cursor.execute(
+                """
+                    SELECT artifact_hash, owner
+                    FROM product4_publish_leases
+                    WHERE session_id = %s AND lease_until > NOW()
+                    FOR UPDATE
+                """,
+                (session_id,),
+            )
+            if cursor.fetchone() is not None:
+                raise PublishLeaseBusy()
+            # product4_documents and product4_publish_leases both reference
+            # product4_sessions with ON DELETE CASCADE.  Deleting the locked
+            # parent row therefore removes every dependent artifact in this
+            # same transaction, with no soft-delete residue.
+            delete_query = "DELETE FROM product4_sessions WHERE session_id = %s"
+            delete_params: tuple[Any, ...] = (session_id,)
+            if owner_id is not None:
+                delete_query += " AND owner_id = %s"
+                delete_params += (owner_id,)
+            delete_query += " AND revision = %s"
+            delete_params += (expected_revision,)
+            if expected_generation is not None:
+                delete_query += " AND row_generation = %s"
+                delete_params += (expected_generation,)
+            cursor.execute(delete_query, delete_params)
+            if cursor.rowcount != 1:
+                raise StorageRevisionConflict("Flow changed before deletion started.")
 
     def load_document(
         self, session_id: str, kind: str, owner_id: str | None = None

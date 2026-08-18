@@ -1323,6 +1323,52 @@ class WorkbenchApp:
             )
             return self.view(session, owner_id)
 
+    def delete(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Permanently remove an owned flow after a current-revision check."""
+
+        session_id = _safe_session_id(session_id)
+        self._require_editable_session(session_id)
+        owner_id = self._effective_owner(owner_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
+            self._require_revision(session, body)
+            try:
+                self.storage.delete_session(
+                    session_id,
+                    expected_revision=session.revision,
+                    expected_generation=self._token(session_id, owner_id),
+                    owner_id=owner_id,
+                )
+            except StorageNotFound as exc:
+                raise ApiError(
+                    "P4_SESSION_NOT_FOUND",
+                    "Session does not exist.",
+                    HTTPStatus.NOT_FOUND,
+                ) from exc
+            except PublishLeaseBusy as exc:
+                raise ApiError(exc.code, exc.message, HTTPStatus.CONFLICT) from exc
+            except StorageRevisionConflict as exc:
+                raise ApiError(
+                    "P4_REVISION_CONFLICT",
+                    "Session changed in another request.",
+                    HTTPStatus.CONFLICT,
+                ) from exc
+            except StorageError as exc:
+                raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
+            self._session_tokens.pop((self._owner_key(owner_id), session_id), None)
+            with self._publish_guard:
+                self._glific_progress.pop((self._owner_key(owner_id), session_id), None)
+                self._glific_inflight = {
+                    item for item in self._glific_inflight
+                    if item != (self._owner_key(owner_id), session_id)
+                }
+            return {"deleted": True, "session_id": session_id}
+
     def propose(
         self,
         session_id: str,
@@ -1993,6 +2039,24 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_DELETE(self) -> None:
+        try:
+            parsed = urlsplit(self.path)
+            path = unquote(parsed.path)
+            parts = [part for part in path.split("/") if part]
+            if len(parts) != 3 or parts[:2] != ["api", "sessions"]:
+                raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", HTTPStatus.NOT_FOUND)
+            body = self._body()
+            principal = self._require_csrf()
+            owner_id = principal.user_id if not self.app.test_mode else None
+            self._send_json(self.app.delete(parts[2], body, owner_id))
+        except ApiError as exc:
+            self._send_error(exc)
+        except Exception as exc:  # noqa: BLE001 - last-resort HTTP boundary
+            self._send_error(
+                _api_error_from_exception(exc, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+            )
+
     def do_POST(self) -> None:
         try:
             parsed = urlsplit(self.path)
@@ -2036,6 +2100,9 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
                     "compile": self.app.compile,
                     "publish": self.app.publish,
                 }
+                if action == "delete":
+                    self._send_json(self.app.delete(session_id, body, owner_id))
+                    return
                 if action not in actions:
                     raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", HTTPStatus.NOT_FOUND)
                 self._send_json(actions[action](session_id, body, owner_id))
