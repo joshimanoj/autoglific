@@ -1,29 +1,38 @@
 (() => {
   "use strict";
 
+  const initialRequestedSessionId = (() => {
+    try {
+      return (new URLSearchParams(window.location.search).get("session") || "").trim();
+    } catch (_error) {
+      return "";
+    }
+  })();
+
   let state = null;
   let sessions = [];
   let sessionsLoadGeneration = 0;
   let flowLoadGeneration = 0;
   let settings = null;
   let sessionsLoading = false;
-  let flowLoading = false;
-  let loadingSessionId = "";
+  let flowLoading = Boolean(initialRequestedSessionId);
+  let loadingSessionId = initialRequestedSessionId;
   let lastSelectedSessionId = "";
-  let loadingAction = "";
-  let loadingStatus = "";
+  let loadingAction = initialRequestedSessionId ? "resume" : "";
+  let loadingStatus = initialRequestedSessionId ? "Opening your flow…" : "";
   let lastError = null;
-  let busy = false;
+  let busy = Boolean(initialRequestedSessionId);
   let generating = false;
   let glificPublishing = false;
   let glificStatusPoller = null;
-  let workspaceMode = "landing";
-  let processPanel = "publishing";
+  let workspaceMode = initialRequestedSessionId ? "publishing" : "landing";
+  let processPanel = initialRequestedSessionId ? "conversation" : "publishing";
   let reviewPanel = "mermaid";
   let publishingPhase = null;
   let mermaidRenderToken = 0;
   let mermaidRenderError = null;
   let mermaidConfigured = false;
+  let mermaidLoadPromise = null;
   let renderedPresentationSource = "";
   const mermaidSvgCache = new Map();
   let renderedQuestionKey = "";
@@ -49,8 +58,14 @@
   let setupShownForUser = "";
   const flowMemoryCache = new Map();
   const libraryMemoryCache = new Map();
+  const flowRequestInFlight = new Map();
+  const libraryRequestInFlight = new Map();
   let cacheNamespaceKey = "public";
+  let startupError = null;
+  let startupGeneration = 0;
   const TOAST_DURATION_MS = 2600;
+  const CACHE_STORAGE_PREFIX = "autoglific:session-cache:v1:";
+  const CACHE_SENSITIVE_KEY = /password|api[_-]?key|secret|credential|csrf|auth(?:entication)?[_-]?token|access[_-]?token|refresh[_-]?token|settings/i;
 
   const $ = (id) => document.getElementById(id);
   const hasAuthUi = () => Boolean($("auth-view"));
@@ -63,8 +78,84 @@
     .replaceAll("'", "&#39;");
   const compactJson = (value) => JSON.stringify(value);
 
+  function sessionStorageOrNull() {
+    try { return window.sessionStorage || null; } catch (_error) { return null; }
+  }
+
+  function storageCacheKey(kind, namespace, sessionId = "") {
+    const suffix = sessionId ? ":" + encodeURIComponent(String(sessionId)) : "";
+    return CACHE_STORAGE_PREFIX + kind + ":" + encodeURIComponent(String(namespace)) + suffix;
+  }
+
+  function cacheSafeValue(value, key = "") {
+    if (CACHE_SENSITIVE_KEY.test(key)) return undefined;
+    if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+    if (Array.isArray(value)) return value.map((item) => cacheSafeValue(item)).filter((item) => item !== undefined);
+    if (typeof value !== "object") return undefined;
+    const result = {};
+    Object.entries(value).forEach(([childKey, childValue]) => {
+      const safe = cacheSafeValue(childValue, childKey);
+      if (safe !== undefined) result[childKey] = safe;
+    });
+    return result;
+  }
+
+  function readStorageJson(key) {
+    const storage = sessionStorageOrNull();
+    if (!storage) return null;
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : null;
+    } catch (_error) {
+      try { storage.removeItem(key); } catch (_ignored) {}
+      return null;
+    }
+  }
+
+  function writeStorageJson(key, value) {
+    const storage = sessionStorageOrNull();
+    if (!storage) return;
+    try { storage.setItem(key, JSON.stringify(value)); } catch (_error) {}
+  }
+
+  function clearPersistentCaches() {
+    const storage = sessionStorageOrNull();
+    if (!storage) return;
+    const keys = [];
+    try {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (key && key.startsWith(CACHE_STORAGE_PREFIX)) keys.push(key);
+      }
+      keys.forEach((key) => storage.removeItem(key));
+    } catch (_error) {}
+  }
+
+  function hydratePersistentCaches() {
+    const namespace = currentCacheNamespace();
+    const library = readStorageJson(storageCacheKey("library", namespace));
+    if (library && Array.isArray(library.sessions)) libraryMemoryCache.set(namespace, library);
+    const storage = sessionStorageOrNull();
+    if (!storage) return;
+    const flowPrefix = storageCacheKey("flow", namespace) + ":";
+    const keys = [];
+    try {
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (key && key.startsWith(flowPrefix)) keys.push(key);
+      }
+    } catch (_error) { return; }
+    keys.forEach((key) => {
+      const payload = readStorageJson(key);
+      const sessionId = payload?.session?.id;
+      if (sessionId) flowMemoryCache.set(flowCacheKey(sessionId), payload);
+    });
+  }
+
   function currentCacheNamespace() {
-    const next = authenticated ? "user:" + String(authUser?.id || authUser?.email || "unknown") : "public";
+    const next = authenticated && hasAuthUi() ? "user:" + String(authUser?.id || authUser?.email || "unknown") : "public";
     if (next !== cacheNamespaceKey) {
       flowMemoryCache.clear();
       libraryMemoryCache.clear();
@@ -75,12 +166,28 @@
   function clearClientCaches() {
     flowMemoryCache.clear();
     libraryMemoryCache.clear();
-    cacheNamespaceKey = authenticated ? "user:" + String(authUser?.id || authUser?.email || "unknown") : "public";
+    clearPersistentCaches();
+    cacheNamespaceKey = authenticated && hasAuthUi() ? "user:" + String(authUser?.id || authUser?.email || "unknown") : "public";
+  }
+  function invalidateAuthState() {
+    authenticated = false;
+    authUser = null;
+    clearClientCaches();
   }
   function flowCacheKey(sessionId) { return currentCacheNamespace() + ":flow:" + String(sessionId); }
   function cacheFlowPayload(payload) {
     const id = payload?.session?.id;
-    if (id) flowMemoryCache.set(flowCacheKey(id), payload);
+    if (!id) return;
+    const safePayload = cacheSafeValue(payload);
+    if (!safePayload) return;
+    flowMemoryCache.set(flowCacheKey(id), safePayload);
+    writeStorageJson(storageCacheKey("flow", currentCacheNamespace(), id), safePayload);
+  }
+  function invalidateLibraryCache() {
+    const namespace = currentCacheNamespace();
+    libraryMemoryCache.delete(namespace);
+    const storage = sessionStorageOrNull();
+    try { storage?.removeItem(storageCacheKey("library", namespace)); } catch (_error) {}
   }
   function flowPath(sessionId) {
     const prefix = authenticated ? "/api/sessions/" : "/api/public/sessions/";
@@ -193,6 +300,7 @@
     P4_GLIFIC_CONFIGURATION_MISSING: ["Connect Glific before publishing.", "Open Settings, save the HTTPS tenant URL, mobile number, and password, then try Publish again."],
     P4_AUTH_REQUIRED: ["Sign in to continue.", "Create an account or sign in to keep your flows private."],
     P4_AUTH_INVALID_CREDENTIALS: ["Email or password is incorrect.", "Check your details and try again."],
+    P4_STARTUP_UNAVAILABLE: ["AutoGlific is temporarily unavailable.", "Check your connection, then retry startup."],
     P4_AUTH_EMAIL_EXISTS: ["An account already exists.", "Sign in with that email or use a different address."],
     P4_AUTH_RATE_LIMITED: ["Too many sign-in attempts.", "Wait a few minutes, then try again."],
     P4_AUTH_EMAIL_INVALID: ["Enter a valid email address.", "Check the email format and try again."],
@@ -275,6 +383,7 @@
   }
   function showToast(kind, value) {
     if (kind !== "error") return;
+    startupError = null;
     lastError = value;
     toastVisible = Boolean(value);
     if (toastVisible) armToastTimer();
@@ -282,7 +391,17 @@
     renderAlerts();
   }
   function dismissToast() {
+    startupError = null;
     toastVisible = false;
+    clearToastTimer();
+    renderAlerts();
+  }
+
+  function showStartupError(error) {
+    const source = error || {};
+    startupError = friendlyError({ code: "P4_STARTUP_UNAVAILABLE", request_id: source.request_id || source.requestId });
+    lastError = startupError;
+    toastVisible = true;
     clearToastTimer();
     renderAlerts();
   }
@@ -303,12 +422,10 @@
       failure.status = response.status;
       failure.request_id = detail.request_id || response.headers?.get?.("X-AutoGlific-Request-ID") || "";
       failure.available_branches = Array.isArray(detail.available_branches) ? detail.available_branches : [];
-      if (["P4_AUTH_REQUIRED", "P4_AUTH_INVALID_SESSION"].includes(failure.code)) clearClientCaches();
+      if (["P4_AUTH_REQUIRED", "P4_AUTH_INVALID_SESSION"].includes(failure.code)) invalidateAuthState();
       throw failure;
     }
-    if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
-      libraryMemoryCache.delete(currentCacheNamespace());
-    }
+    if (!["GET", "HEAD", "OPTIONS"].includes(method)) invalidateLibraryCache();
     return payload;
   }
 
@@ -446,24 +563,47 @@
     window.setTimeout(() => $("auth-email")?.focus(), 0);
   }
 
-  async function bootstrapAuth() {
-    if (!hasAuthUi()) return;
-    try {
-      const csrf = await request("/api/auth/csrf");
-      csrfToken = String(csrf.csrf_token || "");
-      const current = await request("/api/auth/me");
-      authenticated = current.authenticated === true;
-      authUser = current.user || null;
-      currentCacheNamespace();
-      authVisible = false;
-      render();
-    } catch (_error) {
+  function isAuthenticationRejection(error) {
+    return ["P4_AUTH_REQUIRED", "P4_AUTH_INVALID_SESSION"].includes(error?.code);
+  }
+
+  async function bootstrapAuth(attempt = null) {
+    if (!hasAuthUi()) return { authKnown: true, authenticated };
+    const results = await Promise.allSettled([
+      request("/api/auth/csrf"),
+      request("/api/auth/me"),
+    ]);
+    if (attempt !== null && attempt !== startupGeneration) return { stale: true, authKnown: false, authenticated };
+
+    const [csrfResult, meResult] = results;
+    const transientErrors = [];
+    if (csrfResult.status === "fulfilled") csrfToken = String(csrfResult.value?.csrf_token || "");
+    else if (!isAuthenticationRejection(csrfResult.reason)) transientErrors.push(csrfResult.reason);
+
+    let authKnown = false;
+    if (meResult.status === "fulfilled") {
+      authKnown = true;
+      authenticated = meResult.value?.authenticated === true;
+      authUser = meResult.value?.user || null;
+    } else if (isAuthenticationRejection(meResult.reason)) {
+      authKnown = true;
       authenticated = false;
       authUser = null;
       clearClientCaches();
-      authVisible = false;
-      render();
+    } else {
+      transientErrors.push(meResult.reason);
     }
+
+    if (authKnown) {
+      currentCacheNamespace();
+      hydratePersistentCaches();
+    }
+    render();
+    return {
+      authKnown,
+      authenticated,
+      startupError: transientErrors[0] || null,
+    };
   }
 
   async function submitAuth(event) {
@@ -516,27 +656,47 @@
         void loadSessions().catch((error) => fail(error));
       } else startNewFlow();
     }
-    else if (action === "resume" && authenticated) void resumeSessionFromUrl();
+    else if (action === "resume" && authenticated) void resumeSessionFromUrl({ authReady: true, startupAttempt: ++startupGeneration });
     else if (action === "settings" && authenticated) void openSettings();
-    else if (!action && authenticated) void resumeAuthenticatedWorkspace();
+    else if (!action && authenticated) void resumeAuthenticatedWorkspace({ startupAttempt: ++startupGeneration });
   }
 
-  async function resumeAuthenticatedWorkspace() {
+  async function resumeAuthenticatedWorkspace({ startupAttempt = null } = {}) {
     if (!authenticated) return;
     workspaceMode = "authoring";
+    flowLoading = false;
+    busy = false;
     render();
     const requestedSession = new URLSearchParams(window.location.search).get("session");
     if (requestedSession) {
-      await resumeSessionFromUrl();
+      await resumeSessionFromUrl({ authReady: true, startupAttempt });
+      return;
+    }
+    const namespace = currentCacheNamespace();
+    const cachedLibrary = libraryMemoryCache.get(namespace) || readStorageJson(storageCacheKey("library", namespace));
+    const libraryRequest = loadSessions();
+    if (!state && cachedLibrary && Array.isArray(cachedLibrary.sessions) && cachedLibrary.sessions.length) {
+      const preferred = cachedLibrary.sessions.some((item) => item.id === lastSelectedSessionId) ? lastSelectedSessionId : orderSessions(cachedLibrary.sessions)[0].id;
+      await selectSession(preferred);
+      void libraryRequest.catch((error) => {
+        if (isAuthenticationRejection(error)) showAuth("login");
+        else { showStartupError(error); render(); }
+      });
       return;
     }
     try {
-      await loadSessions();
+      await libraryRequest;
       if (!state && sessions.length) {
         const preferred = sessions.some((item) => item.id === lastSelectedSessionId) ? lastSelectedSessionId : sessions[0].id;
         await selectSession(preferred);
       }
-    } catch (error) { fail(error); }
+    } catch (error) {
+      if (isAuthenticationRejection(error)) showAuth("login");
+      else {
+        showStartupError(error);
+        render();
+      }
+    }
   }
 
   function revision() { return state?.session?.revision; }
@@ -564,6 +724,7 @@
     processPanel = "conversation";
     publishingPhase = null;
     renderedPresentationSource = "";
+    startupError = null;
     lastError = null;
     toastVisible = false;
     clearToastTimer();
@@ -588,6 +749,7 @@
     state = payload;
     cacheFlowPayload(payload);
     if (workspaceMode === "landing" && payload?.session) workspaceMode = "authoring";
+    startupError = null;
     lastError = null;
     toastVisible = false;
     clearToastTimer();
@@ -629,7 +791,8 @@
     const alerts = $("alerts");
     if (!alerts) return;
     if (!toastVisible || !lastError) { alerts.replaceChildren(); return; }
-    alerts.innerHTML = "<div class=\"alert error\" role=\"alert\"><strong>" + esc(lastError.message) + "</strong><span>" + esc(lastError.recovery) + "</span><small>Reference: " + esc(lastError.reference || lastError.code || "AutoGlific") + "</small><button type=\"button\" class=\"alert-close\" aria-label=\"Dismiss notification\">×</button></div>";
+    const retry = startupError ? "<button type=\"button\" class=\"alert-retry secondary-button\" data-startup-retry>Retry startup</button>" : "";
+    alerts.innerHTML = "<div class=\"alert error\" role=\"alert\"><strong>" + esc(lastError.message) + "</strong><span>" + esc(lastError.recovery) + "</span><small>Reference: " + esc(lastError.reference || lastError.code || "AutoGlific") + "</small>" + retry + "<button type=\"button\" class=\"alert-close\" aria-label=\"Dismiss notification\">×</button></div>";
   }
 
   function sessionStatus(item) {
@@ -675,6 +838,7 @@
     $("app").dataset.view = workspaceMode;
     document.body.classList.toggle("landing-body", workspaceMode === "landing");
     const authBlocking = hasAuthUi() && authVisible && !authenticated;
+    document.body.classList.toggle("workspace-body", workspaceMode !== "landing" && !authBlocking);
     $("auth-view")?.classList.toggle("hidden", !authBlocking);
     $("landing-view").classList.toggle("hidden", workspaceMode !== "landing" || authBlocking);
     $("workspace-view").classList.toggle("hidden", workspaceMode === "landing" || authBlocking);
@@ -980,6 +1144,43 @@
     canvas.innerHTML = "<div class=\"graph-render-error\" role=\"alert\"><strong>We couldn’t draw the flow graph.</strong><span>Your approved flow is safe. Try rendering it again.</span><button type=\"button\" class=\"secondary-button retry-mermaid\">Retry graph</button></div>";
     canvas.querySelector(".retry-mermaid").addEventListener("click", () => { renderedPresentationSource = ""; renderAuthoredMermaid(presentationMermaidSource(), canvas.id); });
   }
+
+  function mermaidApiReady() {
+    const api = window.mermaid;
+    return api && typeof api.initialize === "function" && typeof api.render === "function" ? api : null;
+  }
+
+  function loadMermaid() {
+    if (mermaidLoadPromise) return mermaidLoadPromise;
+    const ready = mermaidApiReady();
+    if (ready) return Promise.resolve(ready);
+    mermaidLoadPromise = new Promise((resolve, reject) => {
+      const existing = document.querySelector?.('script[data-autoglific-mermaid="true"]');
+      const script = existing || document.createElement("script");
+      if (!existing) {
+        script.src = "/static/vendor/mermaid-11.16.0.min.js";
+        script.async = true;
+        script.setAttribute("data-autoglific-mermaid", "true");
+      }
+      const rejectLoad = (message) => {
+        if (!existing) script.remove?.();
+        reject(new Error(message));
+      };
+      script.addEventListener("load", () => {
+        const api = mermaidApiReady();
+        if (api) resolve(api);
+        else rejectLoad("The local Mermaid renderer is unavailable.");
+      }, { once: true });
+      script.addEventListener("error", () => rejectLoad("The local Mermaid renderer could not be loaded."), { once: true });
+      if (!existing) (document.head || document.body).appendChild(script);
+      else if (mermaidApiReady()) resolve(mermaidApiReady());
+    }).catch((error) => {
+      mermaidLoadPromise = null;
+      throw error;
+    });
+    return mermaidLoadPromise;
+  }
+
   async function renderAuthoredMermaid(source, canvasId = "review-graph") {
     const canvas = $(canvasId);
     if (!canvas) return;
@@ -998,9 +1199,9 @@
     canvas.replaceChildren();
     if (!sourceText || sourceText.includes("No authored nodes yet")) { canvas.innerHTML = "<div class=\"graph-empty\"><strong>Your flow will appear here</strong><span>Complete the authored flow to see its connected presentation.</span></div>"; renderedPresentationSource = renderKey; return; }
     canvas.innerHTML = "<div class=\"graph-render-loading\" role=\"status\">Rendering the approved flow…</div>";
-    const mermaidApi = window.mermaid;
-    if (!mermaidApi || typeof mermaidApi.initialize !== "function" || typeof mermaidApi.render !== "function") { showMermaidRenderError(token, new Error("The local Mermaid renderer is unavailable."), canvas); return; }
     try {
+      const mermaidApi = await loadMermaid();
+      if (token !== mermaidRenderToken) return;
       if (!mermaidConfigured) { mermaidApi.initialize({ startOnLoad: false, securityLevel: "strict", theme: "base", flowchart: { htmlLabels: false, useMaxWidth: false, curve: "basis" } }); mermaidConfigured = true; }
       const rendered = await mermaidApi.render("p4-presentation-mermaid-" + token, sourceText);
       if (token !== mermaidRenderToken) return;
@@ -1207,10 +1408,38 @@
     }, 0);
   }
 
+  function requestFlowPayload(sessionId) {
+    const key = flowCacheKey(sessionId);
+    const existing = flowRequestInFlight.get(key);
+    if (existing) return existing;
+    const requestPromise = request(flowPath(sessionId)).finally(() => {
+      if (flowRequestInFlight.get(key) === requestPromise) flowRequestInFlight.delete(key);
+    });
+    flowRequestInFlight.set(key, requestPromise);
+    return requestPromise;
+  }
+
+  function cacheLibraryPayload(namespace, payload) {
+    const safePayload = cacheSafeValue({ sessions: Array.isArray(payload?.sessions) ? payload.sessions : [] });
+    libraryMemoryCache.set(namespace, safePayload);
+    writeStorageJson(storageCacheKey("library", namespace), safePayload);
+  }
+
+  function requestLibraryPayload(namespace) {
+    const existing = libraryRequestInFlight.get(namespace);
+    if (existing) return existing;
+    const path = authenticated ? "/api/sessions" : "/api/public/sessions";
+    const requestPromise = request(path).finally(() => {
+      if (libraryRequestInFlight.get(namespace) === requestPromise) libraryRequestInFlight.delete(namespace);
+    });
+    libraryRequestInFlight.set(namespace, requestPromise);
+    return requestPromise;
+  }
+
   async function loadSessions() {
     const generation = ++sessionsLoadGeneration;
     const namespace = currentCacheNamespace();
-    const cached = libraryMemoryCache.get(namespace);
+    const cached = libraryMemoryCache.get(namespace) || readStorageJson(storageCacheKey("library", namespace));
     if (cached) {
       sessions = orderSessions(Array.isArray(cached.sessions) ? cached.sessions : []);
       sessionsLoading = false;
@@ -1220,9 +1449,9 @@
       renderLibrary();
     }
     try {
-      const payload = await request(authenticated ? "/api/sessions" : "/api/public/sessions");
+      const payload = await requestLibraryPayload(namespace);
       if (generation === sessionsLoadGeneration) {
-        libraryMemoryCache.set(namespace, payload);
+        cacheLibraryPayload(namespace, payload);
         sessions = orderSessions(Array.isArray(payload.sessions) ? payload.sessions : []);
       }
     }
@@ -1244,36 +1473,117 @@
     try { const payload = await request("/api/sessions", { method: "POST", body: JSON.stringify({ session_id: "flow-" + suffix, title, reset: true }) }); workspaceMode = "authoring"; processPanel = "publishing"; publishingPhase = null; $("name-dialog").close(); titleInput.value = ""; $("name-error").textContent = ""; busy = false; window.history.replaceState({}, "", "?session=" + encodeURIComponent(payload.session.id)); apply(payload); void loadSessions(); window.setTimeout(() => $("instruction").focus(), 0); }
     catch (error) { fail(error); }
   }
-  async function resumeSessionFromUrl() {
-    const params = new URLSearchParams(window.location.search);
-    if (hasAuthUi()) {
-      await bootstrapAuth();
+  function requestedSessionFromUrl() {
+    return (new URLSearchParams(window.location.search).get("session") || "").trim();
+  }
+
+  function showStartupFailure(error, sessionId = "") {
+    showStartupError(error);
+    if (sessionId) {
+      if (!state) {
+        workspaceMode = "publishing";
+        processPanel = "conversation";
+        flowLoading = true;
+        busy = true;
+        loadingSessionId = sessionId;
+        loadingAction = "resume";
+        loadingStatus = "Opening your flow…";
+      }
+    } else {
+      workspaceMode = "landing";
+      state = null;
+      flowLoading = false;
+      busy = false;
+      loadingSessionId = "";
+      loadingAction = "";
+      loadingStatus = "";
     }
-    if (!params.has("session")) {
+    render();
+  }
+
+  function revalidateFlow(sessionId, generation, preferredProcessPanel) {
+    void requestFlowPayload(sessionId).then((fresh) => {
+      if (generation === flowLoadGeneration && state?.session?.id === sessionId) apply(fresh, false, { processPanel: preferredProcessPanel });
+    }).catch((error) => {
+      if (generation !== flowLoadGeneration) return;
+      if (isAuthenticationRejection(error)) {
+        clearClientCaches();
+        showAuth("login", "resume");
+      } else if (state?.session?.id === sessionId) {
+        showStartupError(error);
+      }
+    });
+  }
+
+  function retryStartup() {
+    if (!startupError) return;
+    const attempt = ++startupGeneration;
+    const sessionId = requestedSessionFromUrl();
+    startupError = null;
+    lastError = null;
+    toastVisible = false;
+    clearToastTimer();
+    if (sessionId) beginFlowLoading({ sessionId, action: "resume", status: "Opening your flow…" });
+    else {
+      state = null;
+      workspaceMode = "landing";
+      flowLoading = false;
+      busy = false;
+      loadingSessionId = "";
+      loadingAction = "";
+      loadingStatus = "";
+      render();
+    }
+    void resumeSessionFromUrl({ startupAttempt: attempt });
+  }
+
+  async function resumeSessionFromUrl({ authReady = false, startupAttempt = null } = {}) {
+    const attempt = startupAttempt === null ? ++startupGeneration : startupAttempt;
+    const sessionId = requestedSessionFromUrl();
+    if (hasAuthUi() && !authReady) {
+      const authResult = await bootstrapAuth(attempt);
+      if (authResult.stale || attempt !== startupGeneration) return;
+      if (authResult.startupError) {
+        showStartupFailure(authResult.startupError, sessionId);
+        return;
+      }
+    }
+    if (attempt !== startupGeneration) return;
+    if (!sessionId) {
       if (hasAuthUi() && authenticated) {
-        if (workspaceMode === "landing" && !state) void resumeAuthenticatedWorkspace();
+        await resumeAuthenticatedWorkspace({ startupAttempt: attempt });
         return;
       }
       workspaceMode = "landing";
       state = null;
+      flowLoading = false;
+      busy = false;
       render();
       return;
     }
-    const sessionId = (params.get("session") || "").trim();
-    if (!sessionId) { const error = new Error("Session does not exist."); error.code = "P4_SESSION_NOT_FOUND"; fail(error); return; }
     if (hasAuthUi() && !authenticated) {
       try {
+        const cachedPublic = flowMemoryCache.get(flowCacheKey(sessionId));
+        if (cachedPublic?.shared === true) {
+          window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId));
+          workspaceMode = "authoring";
+          void loadSessions().catch((error) => showStartupError(error));
+          apply(cachedPublic, false);
+          return;
+        }
         const publicPayload = await request("/api/public/sessions/" + encodeURIComponent(sessionId));
+        if (attempt !== startupGeneration) return;
         if (publicPayload.shared === true) {
           window.history.replaceState({}, "", "?session=" + encodeURIComponent(sessionId));
           workspaceMode = "authoring";
-          void loadSessions().catch(() => {});
+          void loadSessions().catch((error) => showStartupError(error));
           apply(publicPayload, false);
           return;
         }
       } catch (error) {
-        if (!["P4_AUTH_REQUIRED", "P4_AUTH_INVALID_SESSION"].includes(error?.code)) {
-          fail(error);
+        if (attempt !== startupGeneration) return;
+        if (!isAuthenticationRejection(error) && error?.code !== "P4_SESSION_NOT_FOUND") {
+          showStartupFailure(error, sessionId);
           return;
         }
       }
@@ -1281,9 +1591,13 @@
       return;
     }
     const generation = beginFlowLoading({ sessionId, action: "resume", status: "Opening your flow…" });
-    void loadSessions().catch(() => {});
+    void loadSessions().catch((error) => {
+      if (generation !== flowLoadGeneration) return;
+      if (isAuthenticationRejection(error)) showAuth("login", "resume");
+      else showStartupFailure(error, sessionId);
+    });
     try {
-      const cached = flowMemoryCache.get(flowCacheKey(sessionId));
+      const cached = flowMemoryCache.get(flowCacheKey(sessionId)) || readStorageJson(storageCacheKey("flow", currentCacheNamespace(), sessionId));
       if (cached) {
         if (generation !== flowLoadGeneration) return;
         workspaceMode = cached.glific_publish || cached.pipeline ? "publishing" : "authoring";
@@ -1291,12 +1605,10 @@
         validationAutoAnswerKey = "";
         renderedQuestionKey = "";
         apply(cached, true, { processPanel: "conversation" });
-        void request(flowPath(sessionId)).then((fresh) => {
-          if (generation === flowLoadGeneration && state?.session?.id === sessionId) apply(fresh, false, { processPanel: "conversation" });
-        }).catch(() => {});
+        revalidateFlow(sessionId, generation, "conversation");
         return;
       }
-      const payload = await request(flowPath(sessionId));
+      const payload = await requestFlowPayload(sessionId);
       if (generation !== flowLoadGeneration) return;
       workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring";
       processPanel = "conversation";
@@ -1304,7 +1616,13 @@
       renderedQuestionKey = "";
       apply(payload, true, { processPanel: "conversation" });
     }
-    catch (error) { if (generation === flowLoadGeneration) fail(error); }
+    catch (error) {
+      if (generation !== flowLoadGeneration) return;
+      if (isAuthenticationRejection(error)) {
+        clearClientCaches();
+        showAuth("login", "resume");
+      } else showStartupFailure(error, sessionId);
+    }
   }
   async function selectSession(sessionId, preferredProcessPanel = "conversation", existingGeneration = null) {
     if (!sessionId || (!existingGeneration && (busy || flowLoading))) return;
@@ -1317,7 +1635,7 @@
       render();
     }
     try {
-      const cached = flowMemoryCache.get(flowCacheKey(sessionId));
+      const cached = flowMemoryCache.get(flowCacheKey(sessionId)) || readStorageJson(storageCacheKey("flow", currentCacheNamespace(), sessionId));
       if (cached) {
         if (generation !== flowLoadGeneration) return;
         workspaceMode = cached.glific_publish || cached.pipeline ? "publishing" : "authoring";
@@ -1326,12 +1644,10 @@
         validationAutoAnswerKey = "";
         renderedQuestionKey = "";
         apply(cached, true, { processPanel: preferredProcessPanel });
-        void request(flowPath(sessionId)).then((fresh) => {
-          if (generation === flowLoadGeneration && state?.session?.id === sessionId) apply(fresh, false, { processPanel: preferredProcessPanel });
-        }).catch(() => {});
+        revalidateFlow(sessionId, generation, preferredProcessPanel);
         return;
       }
-      const payload = await request(flowPath(sessionId));
+      const payload = await requestFlowPayload(sessionId);
       if (generation !== flowLoadGeneration) return;
       workspaceMode = payload.glific_publish || payload.pipeline ? "publishing" : "authoring";
       processPanel = preferredProcessPanel;
@@ -1393,6 +1709,7 @@
   async function copyMermaid() { try { await navigator.clipboard.writeText(technicalAuthoredMermaidSource()); } catch (error) { fail(error); } }
   function resetActiveView() {
     stopGlificStatusPolling();
+    startupGeneration += 1;
     state = null;
     busy = false;
     generating = false;
@@ -1408,6 +1725,7 @@
     threadRevealPending = false;
     renderedPresentationSource = "";
     mermaidRenderError = null;
+    startupError = null;
     flowLoadGeneration += 1;
     flowLoading = false;
     loadingSessionId = "";
@@ -1756,6 +2074,11 @@
       goHome,
       resumeSessionFromUrl,
       showToast,
+      showStartupError,
+      retryStartup,
+      loadMermaid,
+      renderAuthoredMermaid,
+      loadSessions,
       stableChoiceValues,
       renderOptionEditor,
       conversationHtml,
@@ -1763,7 +2086,7 @@
       archiveConversationHtml,
       renderLibrary,
       selectSession,
-      getUiState() { return { busy, flowLoading, loadingSessionId, loadingAction, loadingStatus, workspaceMode, processPanel, hasState: Boolean(state) }; },
+      getUiState() { return { busy, flowLoading, loadingSessionId, loadingAction, loadingStatus, workspaceMode, processPanel, hasState: Boolean(state), startupError: Boolean(startupError), authenticated, authVisible }; },
       setSessions(items) { sessionsLoading = false; sessions = orderSessions(items || []); renderLibrary(); },
     };
   }
@@ -1788,7 +2111,10 @@
   $("auth-form")?.addEventListener("submit", submitAuth);
   $("auth-switch")?.addEventListener("click", () => { authMode = authMode === "register" ? "login" : "register"; if ($("auth-display-name")) $("auth-display-name").value = ""; if ($("auth-password")) $("auth-password").value = ""; if ($("auth-error")) $("auth-error").textContent = ""; renderAuth(); });
   $("auth-back")?.addEventListener("click", () => { authVisible = false; pendingAuthAction = ""; render(); });
-  $("alerts").addEventListener("click", (event) => { if (event.target.closest(".alert-close")) dismissToast(); });
+  $("alerts").addEventListener("click", (event) => {
+    if (event.target.closest("[data-startup-retry]")) { retryStartup(); return; }
+    if (event.target.closest(".alert-close")) dismissToast();
+  });
   $("instruction-form").addEventListener("submit", submitInstruction);
   $("answer-form").addEventListener("submit", submitAnswer);
   $("review-flow").addEventListener("click", () => { if (isReviewReady() && !busy) { workspaceMode = "review"; invalidateMermaidRender(); render(); } });
@@ -1813,5 +2139,6 @@
       closeAccountMenu({ restoreFocus: true });
     }
   });
+  render();
   void resumeSessionFromUrl();
 })();
