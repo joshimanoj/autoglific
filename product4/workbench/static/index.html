@@ -5,9 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>AutoGlific — Build Glific flows in plain language</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <script>
+      (() => {
+        const sessionId = (new URLSearchParams(window.location.search).get("session") || "").trim();
+        if (sessionId) document.documentElement.dataset.initialSession = "true";
+      })();
+    </script>
   </head>
   <body>
-    <div id="app" class="app" data-view="landing">
+    <div id="app" class="app" data-view="startup">
       <div id="alerts" class="alerts" aria-live="assertive"></div>
 
       <section id="auth-view" class="auth-view hidden" aria-labelledby="auth-title">
@@ -104,7 +110,7 @@
         <section id="authoring-view" class="authoring-view">
           <section class="conversation" aria-label="Flow conversation">
             <header class="conversation-header">
-              <div><h1 id="flow-title">Start a new flow</h1></div>
+              <div><h1 id="flow-title">Opening flow…</h1></div>
               <div class="header-actions"><button id="save-flow" class="button secondary" type="button" disabled>Save flow</button><button id="review-flow" class="button primary" type="button" disabled>Review flow</button></div>
             </header>
             <div id="thread" class="thread" aria-live="polite"></div>
@@ -142,7 +148,7 @@
             <button id="process-tab-mermaid" class="panel-tab" type="button" role="tab" aria-selected="false" aria-controls="process-mermaid-panel" tabindex="-1" data-panel="mermaid">Flowchart</button>
             <button id="process-tab-publishing" class="panel-tab" type="button" role="tab" aria-selected="true" aria-controls="publishing-panel" tabindex="0" data-panel="publishing">Publish</button>
           </nav>
-          <section id="process-conversation-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="process-tab-conversation"><h1 class="sr-only">Logic</h1><div id="process-conversation-body" class="archive-body"></div></section>
+          <section id="process-conversation-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="process-tab-conversation"><h1 class="sr-only">Logic</h1><div id="process-conversation-body" class="archive-body"><div class="flow-loading" role="status" aria-live="polite"><span class="spinner flow-loading-spinner" aria-hidden="true"></span><strong>Opening your flow…</strong><p>Your saved flow will appear here when it is ready.</p></div></div></section>
           <section id="process-mermaid-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="process-tab-mermaid"><h1 class="sr-only">Flowchart</h1><div id="process-mermaid-body" class="graph-area"><div id="process-mermaid-graph" class="mermaid-canvas" role="img" aria-label="Rendered authored flow graph"></div></div></section>
           <section id="publishing-panel" class="tab-panel publishing-panel" role="tabpanel" aria-labelledby="process-tab-publishing"><h1 id="publishing-title" class="sr-only">Publish</h1><div class="pipeline-body"><div class="pipeline-inner"><div id="pipeline-steps" class="pipeline-steps"></div><button id="pipeline-retry" class="button secondary hidden" type="button">Retry pipeline</button><button id="publication-retry" class="button secondary hidden" type="button">Retry publication</button><section id="published-card" class="published-card hidden"><h3 id="published-heading">Flow published</h3><p id="published-detail"></p><div class="published-actions"><button id="download-json" class="button secondary" type="button">Download final JSON</button><button id="download-mermaid" class="button secondary" type="button">Download Mermaid graph</button><a id="open-whatsapp" class="button primary" target="_blank" rel="noreferrer">Open flow in WhatsApp ↗</a></div></section></div></div></section>
           </section>
@@ -152,8 +158,31 @@
       <dialog id="name-dialog" class="dialog"><form id="name-form" method="dialog"><h2>Name your new flow</h2><p>Give it a clear name. You’ll describe the first segment next.</p><label for="flow-name">Flow name</label><input id="flow-name" autocomplete="off" placeholder="For example: Community outreach" required maxlength="200" /><div id="name-error" class="dialog-error" role="alert"></div><div class="dialog-actions"><button id="cancel-name" class="button secondary" type="button">Cancel</button><button class="button primary" type="submit">Create flow</button></div></form></dialog>
           <dialog id="settings-dialog" class="dialog settings-dialog"><div><div class="dialog-heading"><div><h2 id="settings-title">Connect your accounts</h2><p id="settings-intro">Connect Glific first, then add the OpenAI key required for authoring.</p></div><button id="close-settings" class="dialog-close" type="button" aria-label="Close settings">×</button></div><ol id="settings-progress" class="wizard-progress" aria-label="Connection setup progress"><li data-wizard-progress="1">Glific URL</li><li data-wizard-progress="2">Mobile</li><li data-wizard-progress="3">Glific password</li><li data-wizard-progress="4">OpenAI key</li><li data-wizard-progress="5">Review &amp; save</li></ol><form id="settings-form" class="settings-form"><section class="settings-step" data-wizard-step="1"><h3>Glific base URL</h3><p>Use the HTTPS base URL for your Glific tenant.</p><label for="glific-url">Glific base URL</label><input id="glific-url" type="url" autocomplete="url" maxlength="2048" placeholder="https://your-tenant.glific.com" /><label class="check-row"><input id="clear-glific-base-url" type="checkbox" /> Clear saved Glific URL</label></section><section class="settings-step hidden" data-wizard-step="2"><h3>Glific mobile number</h3><p>Enter the mobile number used for Glific authentication.</p><label for="mobile-number">Glific mobile number</label><input id="mobile-number" type="text" autocomplete="off" maxlength="64" placeholder="Leave blank to keep the saved number" /><label class="check-row"><input id="clear-mobile-number" type="checkbox" /> Clear saved mobile number</label></section><section class="settings-step hidden" data-wizard-step="3"><h3>Glific password</h3><p>Enter the password for the Glific account. It is encrypted on the server.</p><label for="glific-password">Glific password</label><input id="glific-password" type="password" autocomplete="new-password" maxlength="512" placeholder="Leave blank to keep the saved password" /><label class="check-row"><input id="clear-glific-password" type="checkbox" /> Clear saved Glific password</label></section><section class="settings-step hidden" data-wizard-step="4"><h3>OpenAI API key</h3><p>This key is required before you can create or edit a flow. It is never shown back in plaintext.</p><label for="openai-api-key">OpenAI API key</label><input id="openai-api-key" type="password" autocomplete="off" maxlength="512" placeholder="Leave blank to keep the saved key" /><label for="openai-project-id">OpenAI project ID <span class="field-note">(optional)</span></label><input id="openai-project-id" type="text" autocomplete="off" maxlength="128" aria-describedby="openai-project-help" placeholder="Leave blank if your key does not require one" /><p id="openai-project-help" class="field-help">Only needed for keys that require an OpenAI project.</p><label class="check-row"><input id="clear-openai-api-key" type="checkbox" /> Clear saved OpenAI key</label><label class="check-row"><input id="clear-openai-project-id" type="checkbox" /> Clear saved OpenAI project ID</label></section><section class="settings-step hidden" data-wizard-step="5"><h3>Review and save</h3><p>Review the masked status below. Blank fields preserve saved secrets unless you explicitly clear them.</p><dl id="settings-details" class="settings-details"></dl></section><p id="settings-status" class="settings-status" role="status"></p><div class="dialog-actions wizard-actions"><button id="settings-skip" class="button secondary" type="button">Cancel</button><button id="settings-back" class="button secondary" type="button">Back</button><button id="settings-next" class="button primary" type="button">Next</button><button id="settings-save" class="button primary hidden" type="submit">Save settings</button></div></form></div></dialog>
     </div>
-    <!-- Mermaid 11.16.0 (MIT), bundled locally. -->
-    <script src="/static/vendor/mermaid-11.16.0.min.js"></script>
+    <script>
+      (() => {
+        const sessionId = (new URLSearchParams(window.location.search).get("session") || "").trim();
+        if (!sessionId) return;
+        const app = document.getElementById("app");
+        app.dataset.view = "publishing";
+        document.body.classList.add("workspace-body");
+        document.getElementById("authoring-view")?.classList.add("hidden");
+        document.getElementById("review-view")?.classList.add("hidden");
+        const process = document.getElementById("process-view");
+        process?.classList.remove("hidden");
+        process?.setAttribute("aria-busy", "true");
+        document.getElementById("process-tab-conversation")?.setAttribute("aria-selected", "true");
+        document.getElementById("process-tab-publishing")?.setAttribute("aria-selected", "false");
+        document.getElementById("process-conversation-panel")?.classList.remove("hidden");
+        document.getElementById("publishing-panel")?.classList.add("hidden");
+        const loading = '<div class="flow-loading" role="status" aria-live="polite"><span class="spinner flow-loading-spinner" aria-hidden="true"></span><strong>Opening your flow…</strong><p>Your saved flow will appear here when it is ready.</p></div>';
+        const body = document.getElementById("process-conversation-body");
+        if (body) body.innerHTML = loading;
+        const segments = document.getElementById("segment-list");
+        if (segments) segments.innerHTML = loading;
+        const title = document.getElementById("flow-title");
+        if (title) title.textContent = "Opening flow…";
+      })();
+    </script>
     <script src="/static/app.js"></script>
   </body>
 </html>
