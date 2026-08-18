@@ -9,6 +9,7 @@ for safe multi-instance execution.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import tempfile
 import threading
@@ -52,11 +53,11 @@ class PublishLeaseBusy(StorageError):
 class StorageBackend:
     """Minimal interface consumed by ``WorkbenchApp``."""
 
-    def load_session(self, session_id: str) -> AuthoringSession:
+    def load_session(self, session_id: str, owner_id: str | None = None) -> AuthoringSession:
         raise NotImplementedError
 
     def load_session_with_token(
-        self, session_id: str
+        self, session_id: str, owner_id: str | None = None
     ) -> tuple[AuthoringSession, int | str | None]:
         """Load a session and an internal CAS token.
 
@@ -65,11 +66,11 @@ class StorageBackend:
         the revision-only compatibility behavior.
         """
 
-        return self.load_session(session_id), None
+        return self.load_session(session_id, owner_id), None
 
-    def session_exists(self, session_id: str) -> bool:
+    def session_exists(self, session_id: str, owner_id: str | None = None) -> bool:
         try:
-            self.load_session(session_id)
+            self.load_session(session_id, owner_id)
         except StorageNotFound:
             return False
         return True
@@ -80,10 +81,13 @@ class StorageBackend:
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         raise NotImplementedError
 
-    def load_document(self, session_id: str, kind: str) -> dict[str, Any] | None:
+    def load_document(
+        self, session_id: str, kind: str, owner_id: str | None = None
+    ) -> dict[str, Any] | None:
         raise NotImplementedError
 
     def save_document(
@@ -95,6 +99,7 @@ class StorageBackend:
         expected_revision: int | None = None,
         expected_frozen_hash: str | None = None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -110,6 +115,7 @@ class StorageBackend:
         expected_document_frozen_hash: str | None = None,
         expected_artifact_hash: str | None = None,
         expected_document_payload: Mapping[str, Any] | None = None,
+        owner_id: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -120,6 +126,7 @@ class StorageBackend:
         expected_revision: int | None = None,
         expected_frozen_hash: str | None = None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         if expected_revision is None:
             raise StorageRevisionConflict(
@@ -132,6 +139,7 @@ class StorageBackend:
                 expected_revision=expected_revision,
                 expected_frozen_hash=expected_frozen_hash,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
 
     def replace_session_and_clear_derived(
@@ -140,6 +148,7 @@ class StorageBackend:
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         """Replace a session and clear its derived documents atomically."""
 
@@ -155,12 +164,13 @@ class StorageBackend:
         expected_old_pipeline_artifact_hash: str | None,
         expected_old_result: Mapping[str, Any] | None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         """Save a pipeline and conditionally invalidate only its old result."""
 
         raise NotImplementedError
 
-    def list_sessions(self) -> list[tuple[float, AuthoringSession]]:
+    def list_sessions(self, owner_id: str | None = None) -> list[tuple[float, AuthoringSession]]:
         raise NotImplementedError
 
     def acquire_publish_lease(
@@ -173,10 +183,13 @@ class StorageBackend:
         expected_revision: int,
         expected_frozen_hash: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         raise NotImplementedError
 
-    def release_publish_lease(self, session_id: str, owner: str) -> None:
+    def release_publish_lease(
+        self, session_id: str, owner: str, owner_id: str | None = None
+    ) -> None:
         raise NotImplementedError
 
     def record_publish_result(
@@ -189,6 +202,7 @@ class StorageBackend:
         artifact_hash: str,
         owner: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         raise NotImplementedError
 
@@ -277,8 +291,19 @@ def _document_matches_session_binding(
 
 
 _filesystem_lease_lock = threading.Lock()
-_filesystem_leases: dict[tuple[str, str], tuple[str, float, str]] = {}
+_filesystem_leases: dict[tuple[str, str, str], tuple[str, float, str]] = {}
 _filesystem_state_lock = threading.RLock()
+
+
+def _owner_scope(owner_id: str | None) -> str:
+    """Return a stable filesystem scope without putting email text in paths."""
+
+    if owner_id is None:
+        return "legacy"
+    owner = str(owner_id).strip()
+    if not owner:
+        raise StorageError("P4_AUTH_REQUIRED", "Authenticated account is required.")
+    return hashlib.sha256(owner.encode("utf-8")).hexdigest()
 
 
 class FilesystemStorage(StorageBackend):
@@ -298,22 +323,40 @@ class FilesystemStorage(StorageBackend):
         self.confirmations_root = confirmations_root
         self.glific_results_root = glific_results_root
 
-    def session_path(self, session_id: str) -> Path:
-        return self.sessions_root / f"{session_id}.json"
+    def _root(self, root: Path, owner_id: str | None) -> Path:
+        if owner_id is None:
+            return root
+        users_root = self.data_root / "users"
+        scoped = users_root / _owner_scope(owner_id) / root.name
+        scoped.mkdir(parents=True, exist_ok=True)
+        for directory in (users_root, scoped.parent, scoped):
+            try:
+                os.chmod(directory, 0o700)
+            except OSError:
+                pass
+        return scoped
 
-    def document_path(self, session_id: str, kind: str) -> Path:
+    def session_path(self, session_id: str, owner_id: str | None = None) -> Path:
+        return self._root(self.sessions_root, owner_id) / f"{session_id}.json"
+
+    def document_path(
+        self, session_id: str, kind: str, owner_id: str | None = None
+    ) -> Path:
+        confirmations_root = self._root(self.confirmations_root, owner_id)
+        artifacts_root = self._root(self.artifacts_root, owner_id)
+        glific_results_root = self._root(self.glific_results_root, owner_id)
         if kind == "confirmation":
-            return self.confirmations_root / f"{session_id}.json"
+            return confirmations_root / f"{session_id}.json"
         if kind == "pipeline":
-            return self.artifacts_root / session_id / "latest.json"
+            return artifacts_root / session_id / "latest.json"
         if kind == "glific_result":
-            return self.glific_results_root / f"{session_id}.json"
+            return glific_results_root / f"{session_id}.json"
         raise StorageError(
             "P4_STORAGE_KIND_INVALID", "Unknown workbench storage document."
         )
 
-    def load_session(self, session_id: str) -> AuthoringSession:
-        path = self.session_path(session_id)
+    def load_session(self, session_id: str, owner_id: str | None = None) -> AuthoringSession:
+        path = self.session_path(session_id, owner_id)
         if not path.exists():
             raise StorageNotFound("Session does not exist.")
         try:
@@ -324,10 +367,10 @@ class FilesystemStorage(StorageBackend):
             ) from exc
 
     def load_session_with_token(
-        self, session_id: str
+        self, session_id: str, owner_id: str | None = None
     ) -> tuple[AuthoringSession, int | str | None]:
-        path = self.session_path(session_id)
-        session = self.load_session(session_id)
+        path = self.session_path(session_id, owner_id)
+        session = self.load_session(session_id, owner_id)
         try:
             stat = path.stat()
         except OSError as exc:
@@ -342,17 +385,18 @@ class FilesystemStorage(StorageBackend):
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
             if expected_generation is not None:
-                current, current_generation = self.load_session_with_token(session.id)
+                current, current_generation = self.load_session_with_token(session.id, owner_id)
                 if (
                     current.revision != expected_revision
                     or current_generation != expected_generation
                 ):
                     raise StorageRevisionConflict()
             try:
-                SessionStore(self.session_path(session.id)).save(
+                SessionStore(self.session_path(session.id, owner_id)).save(
                     session,
                     expected_revision=expected_revision,
                 )
@@ -361,8 +405,10 @@ class FilesystemStorage(StorageBackend):
                     raise StorageRevisionConflict() from exc
                 raise
 
-    def load_document(self, session_id: str, kind: str) -> dict[str, Any] | None:
-        path = self.document_path(session_id, kind)
+    def load_document(
+        self, session_id: str, kind: str, owner_id: str | None = None
+    ) -> dict[str, Any] | None:
+        path = self.document_path(session_id, kind, owner_id)
         if not path.exists():
             return None
         return _read_json(path)
@@ -376,10 +422,11 @@ class FilesystemStorage(StorageBackend):
         expected_revision: int | None = None,
         expected_frozen_hash: str | None = None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
             if expected_revision is not None:
-                current, current_generation = self.load_session_with_token(session_id)
+                current, current_generation = self.load_session_with_token(session_id, owner_id)
                 if (
                     current.revision != expected_revision
                     or current.frozen_hash != expected_frozen_hash
@@ -397,7 +444,7 @@ class FilesystemStorage(StorageBackend):
                     raise StorageRevisionConflict(
                         "The document is no longer bound to the current flow revision."
                     )
-            _atomic_json(self.document_path(session_id, kind), payload)
+            _atomic_json(self.document_path(session_id, kind, owner_id), payload)
 
     def delete_document(
         self,
@@ -411,6 +458,7 @@ class FilesystemStorage(StorageBackend):
         expected_document_frozen_hash: str | None = None,
         expected_artifact_hash: str | None = None,
         expected_document_payload: Mapping[str, Any] | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
             if (
@@ -424,7 +472,7 @@ class FilesystemStorage(StorageBackend):
                     "Document cleanup requires an expected binding."
                 )
             if expected_revision is not None:
-                current, current_generation = self.load_session_with_token(session_id)
+                current, current_generation = self.load_session_with_token(session_id, owner_id)
                 if (
                     current.revision != expected_revision
                     or current.frozen_hash != expected_frozen_hash
@@ -437,12 +485,12 @@ class FilesystemStorage(StorageBackend):
                         "The document is no longer bound to the current flow revision."
                     )
             if kind in {"pipeline", "glific_result"}:
-                key = (str(self.data_root.resolve()), session_id)
+                key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
                 with _filesystem_lease_lock:
                     lease = _filesystem_leases.get(key)
                     if lease is not None and lease[1] > time.monotonic():
                         raise PublishLeaseBusy()
-            path = self.document_path(session_id, kind)
+            path = self.document_path(session_id, kind, owner_id)
             if not path.exists():
                 return
             if (
@@ -480,9 +528,10 @@ class FilesystemStorage(StorageBackend):
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
-            key = (str(self.data_root.resolve()), session.id)
+            key = (str(self.data_root.resolve()), _owner_scope(owner_id), session.id)
             with _filesystem_lease_lock:
                 lease = _filesystem_leases.get(key)
                 if lease is not None and lease[1] > time.monotonic():
@@ -491,9 +540,10 @@ class FilesystemStorage(StorageBackend):
                 session,
                 expected_revision,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
             for kind in ("confirmation", "pipeline", "glific_result"):
-                self.document_path(session.id, kind).unlink(missing_ok=True)
+                self.document_path(session.id, kind, owner_id).unlink(missing_ok=True)
 
     def replace_pipeline_and_invalidate_result(
         self,
@@ -505,14 +555,15 @@ class FilesystemStorage(StorageBackend):
         expected_old_pipeline_artifact_hash: str | None,
         expected_old_result: Mapping[str, Any] | None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
-            key = (str(self.data_root.resolve()), session_id)
+            key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
             with _filesystem_lease_lock:
                 lease = _filesystem_leases.get(key)
                 if lease is not None and lease[1] > time.monotonic():
                     raise PublishLeaseBusy()
-            old_pipeline = self.load_document(session_id, "pipeline")
+            old_pipeline = self.load_document(session_id, "pipeline", owner_id)
             old_artifact = None
             if old_pipeline:
                 stages = old_pipeline.get("stages")
@@ -544,6 +595,7 @@ class FilesystemStorage(StorageBackend):
                 expected_revision=expected_revision,
                 expected_frozen_hash=expected_frozen_hash,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
             if (
                 old_artifact
@@ -563,15 +615,26 @@ class FilesystemStorage(StorageBackend):
                     expected_document_frozen_hash=result_frozen_hash,
                     expected_artifact_hash=old_artifact,
                     expected_document_payload=expected_old_result,
+                    owner_id=owner_id,
                 )
 
-    def list_sessions(self) -> list[tuple[float, AuthoringSession]]:
+    def list_sessions(self, owner_id: str | None = None) -> list[tuple[float, AuthoringSession]]:
         result: list[tuple[float, AuthoringSession]] = []
-        for path in self.sessions_root.glob("*.json"):
+        for path in self._root(self.sessions_root, owner_id).glob("*.json"):
             try:
                 result.append((path.stat().st_mtime_ns, SessionStore(path).load()))
             except Exception:  # noqa: BLE001, S112 - one damaged draft must not hide the rest
                 continue
+        return result
+
+    def load_view_documents(
+        self, session_id: str, owner_id: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for kind in ("confirmation", "pipeline", "glific_result"):
+            payload = self.load_document(session_id, kind, owner_id)
+            if payload is not None:
+                result[kind] = payload
         return result
 
     def acquire_publish_lease(
@@ -584,11 +647,12 @@ class FilesystemStorage(StorageBackend):
         expected_revision: int,
         expected_frozen_hash: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
-        key = (str(self.data_root.resolve()), session_id)
+        key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
         now = time.monotonic()
         with _filesystem_state_lock, _filesystem_lease_lock:
-            current, current_generation = self.load_session_with_token(session_id)
+            current, current_generation = self.load_session_with_token(session_id, owner_id)
             if (
                 current.revision != expected_revision
                 or current.frozen_hash != expected_frozen_hash
@@ -601,7 +665,7 @@ class FilesystemStorage(StorageBackend):
                     "The flow changed before publication started."
                 )
             if not _pipeline_matches(
-                self.load_document(session_id, "pipeline"),
+                self.load_document(session_id, "pipeline", owner_id),
                 expected_revision=expected_revision,
                 expected_frozen_hash=expected_frozen_hash,
                 artifact_hash=artifact_hash,
@@ -614,8 +678,10 @@ class FilesystemStorage(StorageBackend):
                 raise PublishLeaseBusy()
             _filesystem_leases[key] = (owner, now + ttl_seconds, artifact_hash)
 
-    def release_publish_lease(self, session_id: str, owner: str) -> None:
-        key = (str(self.data_root.resolve()), session_id)
+    def release_publish_lease(
+        self, session_id: str, owner: str, owner_id: str | None = None
+    ) -> None:
+        key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
         with _filesystem_lease_lock:
             existing = _filesystem_leases.get(key)
             if existing is not None and existing[0] == owner:
@@ -631,6 +697,7 @@ class FilesystemStorage(StorageBackend):
         artifact_hash: str,
         owner: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with _filesystem_state_lock:
             self._record_publish_result_locked(
@@ -641,6 +708,7 @@ class FilesystemStorage(StorageBackend):
                 artifact_hash=artifact_hash,
                 owner=owner,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
 
     def _record_publish_result_locked(
@@ -653,8 +721,9 @@ class FilesystemStorage(StorageBackend):
         artifact_hash: str,
         owner: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
-        session, session_generation = self.load_session_with_token(session_id)
+        session, session_generation = self.load_session_with_token(session_id, owner_id)
         if (
             session.revision != expected_revision
             or session.frozen_hash != expected_frozen_hash
@@ -666,7 +735,7 @@ class FilesystemStorage(StorageBackend):
             raise StorageRevisionConflict(
                 "Local flow changed before the publish result was saved."
             )
-        pipeline = self.load_document(session_id, "pipeline")
+        pipeline = self.load_document(session_id, "pipeline", owner_id)
         if not _pipeline_matches(
             pipeline,
             expected_revision=expected_revision,
@@ -676,7 +745,7 @@ class FilesystemStorage(StorageBackend):
             raise StorageRevisionConflict(
                 "The compiled artifact is no longer bound to this flow revision."
             )
-        key = (str(self.data_root.resolve()), session_id)
+        key = (str(self.data_root.resolve()), _owner_scope(owner_id), session_id)
         with _filesystem_lease_lock:
             lease = _filesystem_leases.get(key)
             if (
@@ -695,8 +764,9 @@ class FilesystemStorage(StorageBackend):
             expected_revision=expected_revision,
             expected_frozen_hash=expected_frozen_hash,
             expected_generation=expected_generation,
+            owner_id=owner_id,
         )
-        self.release_publish_lease(session_id, owner)
+        self.release_publish_lease(session_id, owner, owner_id)
 
 
 def _decode_json(value: Any) -> dict[str, Any]:
@@ -754,6 +824,12 @@ class NeonStorage(StorageBackend):
 
     @contextmanager
     def _safe_connection(self):
+        from product4.workbench.request_db import current_request_connection
+
+        request_connection = current_request_connection()
+        if request_connection is not None:
+            yield request_connection
+            return
         try:
             with self._connect() as connection:
                 yield connection
@@ -775,18 +851,28 @@ class NeonStorage(StorageBackend):
             raise StorageNotFound()
         return _decode_json(row[0])
 
-    def load_session(self, session_id: str) -> AuthoringSession:
-        session, _ = self.load_session_with_token(session_id)
+    def load_session(self, session_id: str, owner_id: str | None = None) -> AuthoringSession:
+        session, _ = self.load_session_with_token(session_id, owner_id)
         return session
 
     def load_session_with_token(
-        self, session_id: str
+        self, session_id: str, owner_id: str | None = None
     ) -> tuple[AuthoringSession, int | str | None]:
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT payload, row_generation FROM product4_sessions WHERE session_id = %s",
-                (session_id,),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    "SELECT payload, row_generation FROM product4_sessions WHERE session_id = %s",
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT payload, row_generation
+                    FROM product4_sessions
+                    WHERE session_id = %s AND owner_id = %s
+                    """,
+                    (session_id, owner_id),
+                )
             row = cursor.fetchone()
         try:
             return (
@@ -806,10 +892,11 @@ class NeonStorage(StorageBackend):
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         payload = self._payload(session.model_dump(mode="json"))
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            if expected_revision is None:
+            if expected_revision is None and owner_id is None:
                 cursor.execute(
                     """
                         INSERT INTO product4_sessions(
@@ -826,7 +913,25 @@ class NeonStorage(StorageBackend):
                         payload,
                     ),
                 )
-            elif expected_generation is None:
+            elif expected_revision is None:
+                cursor.execute(
+                    """
+                        INSERT INTO product4_sessions(
+                          session_id, owner_id, revision, title, frozen_hash, payload
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (session_id) DO NOTHING
+                        """,
+                    (
+                        session.id,
+                        owner_id,
+                        session.revision,
+                        session.title,
+                        session.frozen_hash,
+                        payload,
+                    ),
+                )
+            elif expected_generation is None and owner_id is None:
                 cursor.execute(
                     """
                         UPDATE product4_sessions
@@ -850,7 +955,7 @@ class NeonStorage(StorageBackend):
                         expected_revision,
                     ),
                 )
-            else:
+            elif owner_id is None:
                 cursor.execute(
                     """
                         UPDATE product4_sessions
@@ -875,17 +980,113 @@ class NeonStorage(StorageBackend):
                         expected_generation,
                     ),
                 )
+            elif expected_generation is None:
+                cursor.execute(
+                    """
+                        UPDATE product4_sessions
+                        SET revision = %s, title = %s, frozen_hash = %s,
+                            payload = %s::jsonb, row_generation = row_generation + 1,
+                            updated_at = NOW()
+                        WHERE session_id = %s AND owner_id = %s AND revision = %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM product4_publish_leases AS active_lease
+                            WHERE active_lease.session_id = product4_sessions.session_id
+                              AND active_lease.lease_until > NOW()
+                          )
+                        """,
+                    (
+                        session.revision,
+                        session.title,
+                        session.frozen_hash,
+                        payload,
+                        session.id,
+                        owner_id,
+                        expected_revision,
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """
+                        UPDATE product4_sessions
+                        SET revision = %s, title = %s, frozen_hash = %s,
+                            payload = %s::jsonb, row_generation = row_generation + 1,
+                            updated_at = NOW()
+                        WHERE session_id = %s AND owner_id = %s AND revision = %s
+                          AND row_generation = %s
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM product4_publish_leases AS active_lease
+                            WHERE active_lease.session_id = product4_sessions.session_id
+                              AND active_lease.lease_until > NOW()
+                          )
+                        """,
+                    (
+                        session.revision,
+                        session.title,
+                        session.frozen_hash,
+                        payload,
+                        session.id,
+                        owner_id,
+                        expected_revision,
+                        expected_generation,
+                    ),
+                )
             if cursor.rowcount != 1:
                 raise StorageRevisionConflict()
 
-    def load_document(self, session_id: str, kind: str) -> dict[str, Any] | None:
+    def load_document(
+        self, session_id: str, kind: str, owner_id: str | None = None
+    ) -> dict[str, Any] | None:
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT payload FROM product4_documents WHERE session_id = %s AND kind = %s",
-                (session_id, kind),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    "SELECT payload FROM product4_documents WHERE session_id = %s AND kind = %s",
+                    (session_id, kind),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT document.payload
+                    FROM product4_documents AS document
+                    JOIN product4_sessions AS session ON session.session_id = document.session_id
+                    WHERE document.session_id = %s AND document.kind = %s AND session.owner_id = %s
+                    """,
+                    (session_id, kind, owner_id),
+                )
             row = cursor.fetchone()
         return None if row is None else self._row_payload(row)
+
+    def load_view_documents(
+        self, session_id: str, owner_id: str | None = None
+    ) -> dict[str, dict[str, Any]]:
+        """Load the private view artifacts in one owner-scoped round trip."""
+
+        with self._safe_connection() as connection, connection.cursor() as cursor:
+            if owner_id is None:
+                cursor.execute(
+                    """
+                    SELECT kind, payload
+                    FROM product4_documents
+                    WHERE session_id = %s AND kind IN ('confirmation', 'pipeline', 'glific_result')
+                    """,
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT document.kind, document.payload
+                    FROM product4_documents AS document
+                    JOIN product4_sessions AS session
+                      ON session.session_id = document.session_id
+                    WHERE document.session_id = %s
+                      AND document.kind IN ('confirmation', 'pipeline', 'glific_result')
+                      AND session.owner_id = %s
+                    """,
+                    (session_id, owner_id),
+                )
+            rows = cursor.fetchall()
+        return {str(kind): _decode_json(payload) for kind, payload in rows}
 
     @staticmethod
     def _document_binding(
@@ -942,6 +1143,7 @@ class NeonStorage(StorageBackend):
         expected_revision: int | None = None,
         expected_frozen_hash: str | None = None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         revision, frozen_hash, artifact_hash = self._document_binding(kind, payload)
         if expected_revision is not None and (
@@ -957,15 +1159,26 @@ class NeonStorage(StorageBackend):
         serialized = self._payload(payload)
         with self._safe_connection() as connection, connection.cursor() as cursor:
             if expected_revision is not None:
-                cursor.execute(
-                    """
-                        SELECT revision, frozen_hash, row_generation
-                        FROM product4_sessions
-                        WHERE session_id = %s
-                        FOR UPDATE
-                        """,
-                    (session_id,),
-                )
+                if owner_id is None:
+                    cursor.execute(
+                        """
+                            SELECT revision, frozen_hash, row_generation
+                            FROM product4_sessions
+                            WHERE session_id = %s
+                            FOR UPDATE
+                            """,
+                        (session_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                            SELECT revision, frozen_hash, row_generation
+                            FROM product4_sessions
+                            WHERE session_id = %s AND owner_id = %s
+                            FOR UPDATE
+                            """,
+                        (session_id, owner_id),
+                    )
                 session_row = cursor.fetchone()
                 if (
                     session_row is None
@@ -1017,6 +1230,7 @@ class NeonStorage(StorageBackend):
         expected_document_frozen_hash: str | None = None,
         expected_artifact_hash: str | None = None,
         expected_document_payload: Mapping[str, Any] | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with self._safe_connection() as connection, connection.cursor() as cursor:
             if (
@@ -1030,15 +1244,26 @@ class NeonStorage(StorageBackend):
                     "Document cleanup requires an expected binding."
                 )
             if expected_revision is not None:
-                cursor.execute(
-                    """
-                        SELECT revision, frozen_hash, row_generation
-                        FROM product4_sessions
-                        WHERE session_id = %s
-                        FOR UPDATE
-                        """,
-                    (session_id,),
-                )
+                if owner_id is None:
+                    cursor.execute(
+                        """
+                            SELECT revision, frozen_hash, row_generation
+                            FROM product4_sessions
+                            WHERE session_id = %s
+                            FOR UPDATE
+                            """,
+                        (session_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                            SELECT revision, frozen_hash, row_generation
+                            FROM product4_sessions
+                            WHERE session_id = %s AND owner_id = %s
+                            FOR UPDATE
+                            """,
+                        (session_id, owner_id),
+                    )
                 session_row = cursor.fetchone()
                 if (
                     session_row is None
@@ -1090,21 +1315,33 @@ class NeonStorage(StorageBackend):
         expected_revision: int | None = None,
         expected_frozen_hash: str | None = None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         if expected_revision is None:
             raise StorageRevisionConflict(
                 "Derived cleanup requires the current session binding."
             )
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                    SELECT revision, frozen_hash, row_generation
-                    FROM product4_sessions
-                    WHERE session_id = %s
-                    FOR UPDATE
-                    """,
-                (session_id,),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s AND owner_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id, owner_id),
+                )
             session_row = cursor.fetchone()
             if (
                 session_row is None
@@ -1144,10 +1381,11 @@ class NeonStorage(StorageBackend):
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         serialized = self._payload(session.model_dump(mode="json"))
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            if expected_revision is None:
+            if expected_revision is None and owner_id is None:
                 cursor.execute(
                     """
                         INSERT INTO product4_sessions(
@@ -1166,15 +1404,34 @@ class NeonStorage(StorageBackend):
                 )
                 if cursor.rowcount != 1:
                     raise StorageRevisionConflict()
+            elif expected_revision is None:
+                cursor.execute(
+                    """
+                        INSERT INTO product4_sessions(
+                          session_id, owner_id, revision, title, frozen_hash, payload
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                        ON CONFLICT (session_id) DO NOTHING
+                        """,
+                    (
+                        session.id,
+                        owner_id,
+                        session.revision,
+                        session.title,
+                        session.frozen_hash,
+                        serialized,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise StorageRevisionConflict()
             else:
                 cursor.execute(
                     """
-                        SELECT revision, frozen_hash, row_generation
-                        FROM product4_sessions
-                        WHERE session_id = %s
-                        FOR UPDATE
-                        """,
-                    (session.id,),
+                    SELECT revision, frozen_hash, row_generation
+                    FROM product4_sessions
+                    WHERE session_id = %s
+                    """ + (" AND owner_id = %s" if owner_id is not None else "") + " FOR UPDATE",
+                    (session.id, owner_id) if owner_id is not None else (session.id,),
                 )
                 current = cursor.fetchone()
                 if (
@@ -1197,7 +1454,7 @@ class NeonStorage(StorageBackend):
                 )
                 if cursor.fetchone() is not None:
                     raise PublishLeaseBusy()
-                if expected_generation is None:
+                if expected_generation is None and owner_id is None:
                     cursor.execute(
                         """
                             UPDATE product4_sessions
@@ -1215,7 +1472,7 @@ class NeonStorage(StorageBackend):
                             expected_revision,
                         ),
                     )
-                else:
+                elif owner_id is None:
                     cursor.execute(
                         """
                             UPDATE product4_sessions
@@ -1234,13 +1491,53 @@ class NeonStorage(StorageBackend):
                             expected_generation,
                         ),
                     )
+                elif expected_generation is None:
+                    cursor.execute(
+                        """
+                            UPDATE product4_sessions
+                            SET revision = %s, title = %s, frozen_hash = %s,
+                                payload = %s::jsonb, row_generation = row_generation + 1,
+                                updated_at = NOW()
+                            WHERE session_id = %s AND owner_id = %s AND revision = %s
+                            """,
+                        (
+                            session.revision,
+                            session.title,
+                            session.frozen_hash,
+                            serialized,
+                            session.id,
+                            owner_id,
+                            expected_revision,
+                        ),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                            UPDATE product4_sessions
+                            SET revision = %s, title = %s, frozen_hash = %s,
+                                payload = %s::jsonb, row_generation = row_generation + 1,
+                                updated_at = NOW()
+                            WHERE session_id = %s AND owner_id = %s AND revision = %s
+                              AND row_generation = %s
+                            """,
+                        (
+                            session.revision,
+                            session.title,
+                            session.frozen_hash,
+                            serialized,
+                            session.id,
+                            owner_id,
+                            expected_revision,
+                            expected_generation,
+                        ),
+                    )
                 if cursor.rowcount != 1:
                     raise StorageRevisionConflict()
             cursor.execute(
                 """
                     DELETE FROM product4_documents
                     WHERE session_id = %s
-                      AND kind IN ('confirmation', 'pipeline', 'glific_result')
+                    AND kind IN ('confirmation', 'pipeline', 'glific_result')
                     """,
                 (session.id,),
             )
@@ -1255,6 +1552,7 @@ class NeonStorage(StorageBackend):
         expected_old_pipeline_artifact_hash: str | None,
         expected_old_result: Mapping[str, Any] | None,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         revision, frozen_hash, artifact_hash = self._document_binding("pipeline", payload)
         if revision != expected_revision or frozen_hash != expected_frozen_hash:
@@ -1263,15 +1561,26 @@ class NeonStorage(StorageBackend):
             )
         serialized = self._payload(payload)
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                    SELECT revision, frozen_hash, row_generation
-                    FROM product4_sessions
-                    WHERE session_id = %s
-                    FOR UPDATE
-                    """,
-                (session_id,),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s AND owner_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id, owner_id),
+                )
             session_row = cursor.fetchone()
             if (
                 session_row is None
@@ -1356,11 +1665,21 @@ class NeonStorage(StorageBackend):
                     ),
                 )
 
-    def list_sessions(self) -> list[tuple[float, AuthoringSession]]:
+    def list_sessions(self, owner_id: str | None = None) -> list[tuple[float, AuthoringSession]]:
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT payload, EXTRACT(EPOCH FROM updated_at) FROM product4_sessions"
-            )
+            if owner_id is None:
+                cursor.execute(
+                    "SELECT payload, EXTRACT(EPOCH FROM updated_at) FROM product4_sessions"
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT payload, EXTRACT(EPOCH FROM updated_at)
+                    FROM product4_sessions
+                    WHERE owner_id = %s
+                    """,
+                    (owner_id,),
+                )
             rows = cursor.fetchall()
         result: list[tuple[float, AuthoringSession]] = []
         for row in rows:
@@ -1375,6 +1694,91 @@ class NeonStorage(StorageBackend):
                 continue
         return result
 
+    def list_session_summaries(
+        self, owner_id: str | None = None, *, published_only: bool = False
+    ) -> list[tuple[float, dict[str, Any]]]:
+        """Return library fields and publication existence without hydrating drafts."""
+
+        with self._safe_connection() as connection, connection.cursor() as cursor:
+            publication_exists = """
+              EXISTS (
+                SELECT 1
+                FROM product4_documents AS pipeline
+                JOIN product4_documents AS result
+                  ON result.session_id = pipeline.session_id
+                 AND result.kind = 'glific_result'
+                 AND result.revision = session.revision
+                 AND result.frozen_hash IS NOT DISTINCT FROM session.frozen_hash
+                 AND result.artifact_hash = pipeline.artifact_hash
+                 AND result.payload->'result'->>'status' = 'published'
+                WHERE pipeline.session_id = session.session_id
+                  AND pipeline.kind = 'pipeline'
+                  AND pipeline.revision = session.revision
+                  AND pipeline.frozen_hash IS NOT DISTINCT FROM session.frozen_hash
+                  AND pipeline.payload->>'all_stages_passed' = 'true'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(pipeline.payload->'stages', '[]'::jsonb)) AS stage
+                    WHERE stage->>'name' = 'engine3_glific_artifact'
+                      AND stage->>'canonical_hash' = result.artifact_hash
+                  )
+              )
+            """
+            conditions = []
+            params: tuple[Any, ...] = ()
+            if owner_id is not None:
+                conditions.append("session.owner_id = %s")
+                params = (owner_id,)
+            if published_only:
+                conditions.extend(["session.payload->>'state' = 'frozen'", publication_exists])
+            where_clause = "WHERE " + " AND ".join(conditions) if conditions else ""
+            cursor.execute(
+                f"""
+                SELECT
+                  session.session_id,
+                  session.title,
+                  session.revision,
+                  session.updated_at,
+                  session.payload->>'state' AS state,
+                  COALESCE((
+                    SELECT COUNT(DISTINCT node->>'source_statement')
+                    FROM jsonb_array_elements(COALESCE(session.payload->'nodes', '[]'::jsonb)) AS node
+                    WHERE BTRIM(COALESCE(node->>'source_statement', '')) <> ''
+                  ), 0) AS segment_count,
+                  COALESCE(session.payload->'flow_trigger_metadata'->'keywords', '[]'::jsonb) AS keywords,
+                  {publication_exists} AS published
+                FROM product4_sessions AS session
+                {where_clause}
+                ORDER BY session.updated_at DESC, session.session_id
+                """,
+                params,
+            )
+            rows = cursor.fetchall()
+        summaries: list[tuple[float, dict[str, Any]]] = []
+        for session_id, title, revision, updated_at, state, segment_count, keywords, published in rows:
+            try:
+                keyword_values = keywords if isinstance(keywords, list) else json.loads(keywords)
+            except (TypeError, json.JSONDecodeError):
+                keyword_values = []
+            summaries.append(
+                (
+                    float(updated_at.timestamp()) if updated_at is not None else 0.0,
+                    {
+                        "id": session_id,
+                        "title": title,
+                        "state": state,
+                        "revision": revision,
+                        "segment_count": int(segment_count or 0),
+                        "keywords": [
+                            item.get("value") for item in keyword_values
+                            if isinstance(item, dict) and item.get("value")
+                        ],
+                        "published": bool(published),
+                    },
+                )
+            )
+        return summaries
+
     def acquire_publish_lease(
         self,
         session_id: str,
@@ -1385,20 +1789,32 @@ class NeonStorage(StorageBackend):
         expected_revision: int,
         expected_frozen_hash: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         with self._safe_connection() as connection, connection.cursor() as cursor:
             # The session row lock makes the binding check and lease grant one
             # transaction.  No caller can mutate the session between these
             # checks and the external Glific request.
-            cursor.execute(
-                """
-                    SELECT revision, frozen_hash, row_generation
-                    FROM product4_sessions
-                    WHERE session_id = %s
-                    FOR UPDATE
-                    """,
-                (session_id,),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s AND owner_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id, owner_id),
+                )
             session_row = cursor.fetchone()
             if (
                 session_row is None
@@ -1456,7 +1872,9 @@ class NeonStorage(StorageBackend):
             if cursor.rowcount != 1:
                 raise PublishLeaseBusy()
 
-    def release_publish_lease(self, session_id: str, owner: str) -> None:
+    def release_publish_lease(
+        self, session_id: str, owner: str, owner_id: str | None = None
+    ) -> None:
         with self._safe_connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 "DELETE FROM product4_publish_leases WHERE session_id = %s AND owner = %s",
@@ -1473,6 +1891,7 @@ class NeonStorage(StorageBackend):
         artifact_hash: str,
         owner: str,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
         revision, frozen_hash, stored_artifact_hash = self._document_binding(
             "glific_result", payload
@@ -1487,15 +1906,26 @@ class NeonStorage(StorageBackend):
             )
         serialized = self._payload(payload)
         with self._safe_connection() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                    SELECT revision, frozen_hash, row_generation
-                    FROM product4_sessions
-                    WHERE session_id = %s
-                    FOR UPDATE
-                    """,
-                (session_id,),
-            )
+            if owner_id is None:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id,),
+                )
+            else:
+                cursor.execute(
+                    """
+                        SELECT revision, frozen_hash, row_generation
+                        FROM product4_sessions
+                        WHERE session_id = %s AND owner_id = %s
+                        FOR UPDATE
+                        """,
+                    (session_id, owner_id),
+                )
             row = cursor.fetchone()
             if (
                 row is None

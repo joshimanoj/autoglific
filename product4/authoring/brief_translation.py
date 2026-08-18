@@ -186,6 +186,13 @@ def classify_semantic_http_failure(
     """Classify HTTP failures without exposing provider response text."""
 
     signals = str(provider_signals).casefold()
+    # Some OpenAI-compatible providers report an unavailable model as HTTP
+    # 403. An explicit model signal is more specific than the generic project
+    # permission classification and must win regardless of status.
+    if any(token in signals for token in (
+        "model_not_found", "model_not_available", "invalid_model",
+    )) or (status == 404 and "model" in signals):
+        return "P4_SEMANTIC_MODEL_UNAVAILABLE"
     if status == 401 or any(token in signals for token in (
         "invalid_api_key", "incorrect_api_key", "authentication", "unauthorized",
     )):
@@ -204,10 +211,6 @@ def classify_semantic_http_failure(
         "rate_limit", "too_many_requests", "throttl",
     )):
         return "P4_SEMANTIC_RATE_LIMITED"
-    if any(token in signals for token in (
-        "model_not_found", "model_not_available", "invalid_model",
-    )) or (status == 404 and "model" in signals):
-        return "P4_SEMANTIC_MODEL_UNAVAILABLE"
     if status in {408, 504}:
         return "P4_SEMANTIC_NETWORK_FAILURE"
     if status >= 500:
@@ -1500,10 +1503,6 @@ class IncrementalSemanticModelClient:
                 endpoint = base_url
             else:
                 endpoint = f"{base_url.rstrip('/')}/chat/completions"
-        model = cls._environment_value(
-            "PRODUCT4_SEMANTIC_MODEL",
-            "OPENAI_MODEL",
-        ) or DEFAULT_WORKBENCH_SEMANTIC_MODEL
         # Do not forward an ambient project id: OpenAI API keys select their
         # project by default, and an unrelated OPENAI_PROJECT_ID causes a
         # misleading authentication failure. The workbench opts into an
@@ -1512,8 +1511,31 @@ class IncrementalSemanticModelClient:
         return cls(
             ProductionSemanticTransport(
                 endpoint=endpoint,
-                model=model,
+                model=DEFAULT_WORKBENCH_SEMANTIC_MODEL,
                 api_key=api_key,
+                project_id=project_id,
+                http_client=http_client,
+            )
+        )
+
+    @classmethod
+    def from_api_key(
+        cls,
+        api_key: str,
+        *,
+        endpoint: str = DEFAULT_OPENAI_CHAT_COMPLETIONS_ENDPOINT,
+        project_id: str | None = None,
+        http_client: JsonHttpClient | None = None,
+    ) -> IncrementalSemanticModelClient:
+        """Create a fixed-model client from one user's decrypted API key."""
+
+        if not isinstance(api_key, str) or not api_key.strip():
+            raise SemanticTranslationError("P4_SEMANTIC_CREDENTIAL_MISSING")
+        return cls(
+            ProductionSemanticTransport(
+                endpoint=endpoint,
+                model=DEFAULT_WORKBENCH_SEMANTIC_MODEL,
+                api_key=api_key.strip(),
                 project_id=project_id,
                 http_client=http_client,
             )

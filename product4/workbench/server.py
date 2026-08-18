@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,9 @@ import sys
 import threading
 import uuid
 from collections import defaultdict
+from collections.abc import Mapping
 from http import HTTPStatus
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -50,7 +53,33 @@ from product4.workbench.glific_client import (
     GlificConfig,
     _normalize_base_url,
 )
+from product4.workbench.auth import (
+    AUTH_SESSION_COOKIE,
+    AUTH_SESSION_SECONDS,
+    AuthError,
+    AuthResult,
+    CSRF_COOKIE,
+    NativeEmailPasswordProvider,
+    Principal,
+    build_user_store,
+    bootstrap_owner_account,
+    normalize_email,
+    serialize_delete_cookie,
+    serialize_set_cookie,
+)
+from product4.workbench.credentials import (
+    CredentialError,
+    CredentialVault,
+    LOCAL_ENCRYPTION_KEY_FILENAME,
+    _mask_mobile,
+    seed_bootstrap_credentials,
+)
 from product4.workbench.pipeline import run_pipeline
+from product4.workbench.preloaded import (
+    PreloadedPublicationError,
+    load_preloaded_publication,
+    load_preloaded_sessions,
+)
 from product4.workbench.storage import (
     PublishLeaseBusy,
     StorageError,
@@ -58,6 +87,65 @@ from product4.workbench.storage import (
     StorageRevisionConflict,
     build_storage,
 )
+
+_LOCAL_PARENT_ENV_KEYS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "LLM_API_KEY",
+        "LLM_PROJECT_ID",
+        "GLIFIC_PRODUCTION_BASE_URL",
+        "GLIFIC_BASE_URL",
+        "GLIFIC_PHONE",
+        "GLIFIC_PASSWORD",
+    }
+)
+
+
+def _load_private_environment(
+    env_path: Path,
+    *,
+    allowed_keys: frozenset[str] | None = None,
+) -> None:
+    try:
+        mode = env_path.stat().st_mode & 0o777
+        raw_lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if mode & 0o077:
+        return
+    for line in raw_lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+            continue
+        if allowed_keys is not None and key not in allowed_keys:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
+
+
+def _load_local_environment(path: Path | None = None) -> None:
+    """Load private local env files without overriding process secrets."""
+
+    if path is None and os.environ.get("VERCEL", "").strip() == "1":
+        return
+    _load_private_environment(path or (PROJECT_ROOT / ".env.local"))
+    if path is None and os.environ.get("VERCEL", "").strip() != "1":
+        _load_private_environment(
+            AUTOBUILDER_ROOT / ".env",
+            allowed_keys=_LOCAL_PARENT_ENV_KEYS,
+        )
+
+
+_load_local_environment()
+
 
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_JSON_BYTES = 8 * 1024 * 1024
@@ -256,7 +344,7 @@ def _api_error_from_exception(
     return ApiError(
         _error_code(exc),
         _error_message(exc),
-        status,
+        int(getattr(exc, "status", status)),
         request_id=getattr(exc, "request_id", None),
         validation_fingerprint=getattr(exc, "validation_fingerprint", None),
         network_subtype=getattr(exc, "network_subtype", None),
@@ -268,7 +356,15 @@ def _safe_error_message(error: ApiError) -> str:
 
     code = error.code
     if code == "P4_SEMANTIC_CONFIGURATION_MISSING":
-        return "AutoGlific semantic setup is unavailable."
+        return "Save an OpenAI API key in Settings before authoring a flow."
+    if code == "P4_SEMANTIC_CREDENTIAL_MISSING":
+        return "Save an OpenAI API key in Settings before authoring a flow."
+    if code == "P4_GLIFIC_CONFIGURATION_MISSING":
+        return "Connect your Glific account in Settings before publishing."
+    if code == "P4_SHARED_FLOW_READ_ONLY":
+        return "This shared template is available for review only."
+    if code == "P4_CREDENTIAL_ENCRYPTION_KEY_MISSING":
+        return "Credential storage is not configured on the server."
     if code in {
         "P4_SEMANTIC_AUTHENTICATION_FAILED",
         "P4_SEMANTIC_PROJECT_ACCESS_FAILED",
@@ -330,9 +426,61 @@ class WorkbenchApp:
         offline: bool = False,
         glific_client_factory: Any | None = None,
         storage: Any | None = None,
+        user_store: Any | None = None,
+        auth_provider: NativeEmailPasswordProvider | None = None,
+        credential_vault: CredentialVault | None = None,
     ) -> None:
+        self.test_mode = offline
+        self.hosted = os.environ.get("VERCEL", "").strip() == "1"
+        # Hosted auth cookies are always Secure.  The explicit offline/test
+        # seam is the only mode allowed to use HTTP-compatible cookies.
+        self.cookie_secure = not offline
+        self.user_store = user_store or build_user_store(data_root=DATA_ROOT)
+        if not offline:
+            bootstrap_owner_account(self.user_store)
+        self.public_publisher_id: str | None = None
+        if not offline:
+            configured_publisher = os.environ.get("PRODUCT4_BOOTSTRAP_EMAIL", "").strip()
+            if configured_publisher:
+                try:
+                    publisher = self.user_store.find_user_by_email(normalize_email(configured_publisher))
+                    if publisher and publisher.get("user_id"):
+                        self.public_publisher_id = str(publisher["user_id"])
+                except Exception:  # noqa: BLE001 - public sharing fails closed
+                    self.public_publisher_id = None
+        self.auth = auth_provider or NativeEmailPasswordProvider(
+            self.user_store,
+            cookie_secure=self.cookie_secure,
+            test_mode=offline,
+        )
+        self._credential_error: CredentialError | None = None
+        if credential_vault is not None:
+            self.credentials = credential_vault
+        else:
+            try:
+                self.credentials = CredentialVault.from_environment(
+                    self.user_store,
+                    test_mode=offline,
+                    local_key_path=DATA_ROOT / LOCAL_ENCRYPTION_KEY_FILENAME,
+                    allow_local_key=not self.hosted,
+                )
+            except CredentialError as exc:
+                self.credentials = None
+                self._credential_error = exc
+        if not offline and self.credentials is not None:
+            try:
+                seed_bootstrap_credentials(
+                    self.user_store,
+                    self.credentials,
+                    hosted=self.hosted,
+                )
+            except CredentialError as exc:
+                self._credential_error = exc
         if offline:
-            client = None
+            # Offline is the explicit local/test authentication seam, but an
+            # injected semantic client must still be honored by diagnostics
+            # and deterministic integration fixtures.
+            client = semantic_client
             self.semantic_status = "offline test mode"
         else:
             client = semantic_client or _build_semantic_client()
@@ -353,15 +501,265 @@ class WorkbenchApp:
             confirmations_root=CONFIRMATIONS_ROOT,
             glific_results_root=GLIFIC_RESULTS_ROOT,
         )
+        self._preloaded_sessions = load_preloaded_sessions()
         self._locks: defaultdict[str, threading.RLock] = defaultdict(threading.RLock)
         self._glific_client_factory = glific_client_factory or GlificClient.from_environment
         self._publish_guard = threading.Lock()
-        self._glific_inflight: set[str] = set()
-        self._glific_progress: dict[str, str] = {}
-        self._session_tokens: dict[str, int | str] = {}
+        self._glific_inflight: set[tuple[str, str]] = set()
+        self._glific_progress: dict[tuple[str, str], str] = {}
+        self._session_tokens: dict[tuple[str, str], int | str] = {}
+        self._services: dict[tuple[str, str, str], AuthoringService] = {}
 
-    def _lock(self, session_id: str) -> threading.RLock:
-        return self._locks[session_id]
+    @staticmethod
+    def _owner_key(owner_id: str | None) -> str:
+        return owner_id or "legacy"
+
+    def _lock(self, session_id: str, owner_id: str | None = None) -> threading.RLock:
+        return self._locks[(self._owner_key(owner_id), session_id)]
+
+    def _token(self, session_id: str, owner_id: str | None = None) -> int | str | None:
+        return self._session_tokens.get((self._owner_key(owner_id), session_id))
+
+    def _effective_owner(self, owner_id: str | None) -> str | None:
+        # Offline mode is an explicit local/test seam. It keeps the existing
+        # direct-call fixtures working without making production routes public.
+        return None if self.test_mode else owner_id
+
+    def is_shared_session(self, session_id: Any) -> bool:
+        return str(session_id or "") in self._preloaded_sessions
+
+    def is_public_session(self, session_id: Any) -> bool:
+        return self._public_publication(str(session_id or "")) is not None
+
+    @staticmethod
+    def _safe_public_result(value: Any) -> dict[str, Any] | None:
+        try:
+            return _safe_glific_result(value)
+        except ApiError:
+            return None
+
+    def _public_publication(
+        self, session_id: str
+    ) -> tuple[AuthoringSession, dict[str, Any]] | None:
+        """Load a bootstrap-owner publication only after every binding passes."""
+
+        owner_id = self.public_publisher_id
+        if not owner_id or not hasattr(self.storage, "load_view_documents"):
+            return None
+        try:
+            session = self.storage.load_session(session_id, owner_id)
+            documents = self.storage.load_view_documents(session_id, owner_id)
+        except StorageError:
+            return None
+        if session.state is not SessionState.FROZEN or not session.frozen_hash:
+            return None
+        pipeline = documents.get("pipeline")
+        result_document = documents.get("glific_result")
+        if not isinstance(pipeline, dict) or not isinstance(result_document, dict):
+            return None
+        if (
+            pipeline.get("session_id") not in {None, session.id}
+            or pipeline.get("session_revision") != session.revision
+            or pipeline.get("frozen_package_hash") != session.frozen_hash
+            or pipeline.get("all_stages_passed") is not True
+        ):
+            return None
+        artifact_stage = next(
+            (stage for stage in pipeline.get("stages", [])
+             if isinstance(stage, dict) and stage.get("name") == "engine3_glific_artifact"),
+            None,
+        )
+        safe_result = self._safe_public_result(result_document.get("result"))
+        if (
+            not isinstance(artifact_stage, dict)
+            or not safe_result
+            or result_document.get("session_revision") != session.revision
+            or result_document.get("frozen_package_hash") != session.frozen_hash
+            or result_document.get("artifact_hash") != artifact_stage.get("canonical_hash")
+        ):
+            return None
+        return session, {"pipeline": pipeline, "glific_publish": safe_result}
+
+    def view_public(self, session_id: str) -> dict[str, Any]:
+        session_id = _safe_session_id(session_id)
+        loaded = self._public_publication(session_id)
+        if loaded is None:
+            raise ApiError("P4_SESSION_NOT_FOUND", "Session does not exist.", HTTPStatus.NOT_FOUND)
+        session, publication = loaded
+        return self.view(session, None, shared=True, shared_publication=publication)
+
+    def _require_editable_session(self, session_id: str) -> None:
+        if self.is_shared_session(session_id) or self.is_public_session(session_id):
+            raise ApiError(
+                "P4_SHARED_FLOW_READ_ONLY",
+                "This shared template is available for review only.",
+                HTTPStatus.CONFLICT,
+            )
+
+    def authenticate(self, headers: Mapping[str, str], cookies: Mapping[str, str]) -> Principal:
+        try:
+            return self.auth.resolve(headers, cookies)
+        except AuthError:
+            raise
+
+    def require_csrf(self, headers: Mapping[str, str], cookies: Mapping[str, str]) -> Principal:
+        try:
+            return self.auth.require_csrf(headers, cookies)
+        except AuthError:
+            raise
+
+    def auth_csrf(self, cookies: Mapping[str, str]) -> AuthResult:
+        return self.auth.csrf(cookies)
+
+    def auth_register(
+        self,
+        body: Mapping[str, Any],
+        *,
+        headers: Mapping[str, str],
+        cookies: Mapping[str, str],
+    ) -> AuthResult:
+        return self.auth.register(body, headers=headers, cookies=cookies)
+
+    def auth_login(
+        self,
+        body: Mapping[str, Any],
+        *,
+        headers: Mapping[str, str],
+        cookies: Mapping[str, str],
+        client_ip: str | None = None,
+    ) -> AuthResult:
+        return self.auth.login(
+            body,
+            headers=headers,
+            cookies=cookies,
+            client_ip=client_ip,
+        )
+
+    def auth_logout(
+        self,
+        *,
+        headers: Mapping[str, str],
+        cookies: Mapping[str, str],
+    ) -> AuthResult:
+        return self.auth.logout(headers=headers, cookies=cookies)
+
+    def auth_me(self, headers: Mapping[str, str], cookies: Mapping[str, str]) -> dict[str, Any]:
+        return self.auth.me(headers, cookies)
+
+    def _service_for(self, owner_id: str | None) -> AuthoringService:
+        if owner_id is None or self.test_mode:
+            return self.service
+        if self.credentials is None:
+            reason = self._credential_error.code if self._credential_error else "P4_CREDENTIAL_ENCRYPTION_KEY_MISSING"
+            return AuthoringService(
+                RegistryInterpreter(_UnavailableSemanticModelClient(reason)),
+                workbench_mode=True,
+            )
+        try:
+            values = self.credentials.values(owner_id)
+        except CredentialError as exc:
+            return AuthoringService(
+                RegistryInterpreter(_UnavailableSemanticModelClient(exc.code)),
+                workbench_mode=True,
+            )
+        api_key = values.get("openai_api_key")
+        if not api_key:
+            return AuthoringService(
+                RegistryInterpreter(
+                    _UnavailableSemanticModelClient(
+                        "P4_SEMANTIC_CONFIGURATION_MISSING"
+                    )
+                ),
+                workbench_mode=True,
+            )
+        project_id = values.get("openai_project_id") or None
+        cache_key = (
+            owner_id,
+            hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+            hashlib.sha256(project_id.encode("utf-8")).hexdigest() if project_id else "",
+        )
+        cached = self._services.get(cache_key)
+        if cached is not None:
+            return cached
+        try:
+            client = IncrementalSemanticModelClient.from_api_key(
+                api_key,
+                project_id=project_id,
+            )
+        except SemanticTranslationError as exc:
+            return AuthoringService(
+                RegistryInterpreter(_UnavailableSemanticModelClient(str(exc))),
+                workbench_mode=True,
+            )
+        service = AuthoringService(RegistryInterpreter(client), workbench_mode=True)
+        self._services[cache_key] = service
+        return service
+
+    def _credential_values(self, owner_id: str) -> dict[str, str]:
+        if self.credentials is None:
+            if self._credential_error is not None:
+                raise ApiError(
+                    self._credential_error.code,
+                    self._credential_error.message,
+                    self._credential_error.status,
+                )
+            raise ApiError(
+                "P4_CREDENTIAL_ENCRYPTION_KEY_MISSING",
+                "Credential storage is not configured on the server.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            return self.credentials.values(owner_id)
+        except CredentialError as exc:
+            raise ApiError(exc.code, exc.message, exc.status) from exc
+
+    def settings(self, owner_id: str | None = None) -> dict[str, Any]:
+        if owner_id is not None and not self.test_mode:
+            if self.credentials is None:
+                if self._credential_error is not None:
+                    raise ApiError(
+                        self._credential_error.code,
+                        self._credential_error.message,
+                        self._credential_error.status,
+                    )
+                raise ApiError(
+                    "P4_CREDENTIAL_ENCRYPTION_KEY_MISSING",
+                    "Credential storage is not configured on the server.",
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                )
+            try:
+                return self.credentials.status(owner_id)
+            except CredentialError as exc:
+                raise ApiError(exc.code, exc.message, exc.status) from exc
+        if not self.test_mode:
+            raise ApiError(
+                "P4_AUTH_REQUIRED",
+                "Sign in to use AutoGlific.",
+                HTTPStatus.UNAUTHORIZED,
+            )
+        return self._legacy_settings()
+
+    def save_settings(self, owner_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+        if self.credentials is None:
+            if self._credential_error is not None:
+                raise ApiError(
+                    self._credential_error.code,
+                    self._credential_error.message,
+                    self._credential_error.status,
+                )
+            raise ApiError(
+                "P4_CREDENTIAL_ENCRYPTION_KEY_MISSING",
+                "Credential storage is not configured on the server.",
+                HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        try:
+            result = self.credentials.update(owner_id, body)
+        except CredentialError as exc:
+            raise ApiError(exc.code, exc.message, exc.status) from exc
+        self._services = {
+            key: value for key, value in self._services.items() if key[0] != owner_id
+        }
+        return result
 
     @staticmethod
     def _session_path(session_id: str) -> Path:
@@ -379,11 +777,12 @@ class WorkbenchApp:
     def _glific_result_path(session_id: str) -> Path:
         return GLIFIC_RESULTS_ROOT / f"{session_id}.json"
 
-    def _load_session(self, session_id: str) -> AuthoringSession:
+    def _load_session(self, session_id: str, owner_id: str | None = None) -> AuthoringSession:
+        owner_id = self._effective_owner(owner_id)
         try:
-            session, token = self.storage.load_session_with_token(session_id)
+            session, token = self.storage.load_session_with_token(session_id, owner_id)
             if token is not None:
-                self._session_tokens[session_id] = token
+                self._session_tokens[(self._owner_key(owner_id), session_id)] = token
             return session
         except StorageNotFound as exc:
             raise ApiError("P4_SESSION_NOT_FOUND", "Session does not exist.", HTTPStatus.NOT_FOUND) from exc
@@ -404,10 +803,16 @@ class WorkbenchApp:
                 HTTPStatus.CONFLICT,
             )
 
-    def _save(self, session: AuthoringSession, expected_revision: int | None) -> None:
+    def _save(
+        self,
+        session: AuthoringSession,
+        expected_revision: int | None,
+        owner_id: str | None = None,
+    ) -> None:
+        owner_id = self._effective_owner(owner_id)
         try:
             expected_generation = (
-                self._session_tokens.get(session.id)
+                self._token(session.id, owner_id)
                 if expected_revision is not None
                 else None
             )
@@ -415,6 +820,7 @@ class WorkbenchApp:
                 session,
                 expected_revision,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
         except StorageRevisionConflict as exc:
             raise ApiError("P4_REVISION_CONFLICT", "Session changed in another request.", HTTPStatus.CONFLICT) from exc
@@ -427,12 +833,15 @@ class WorkbenchApp:
         expected_revision: int | None,
         *,
         expected_generation: int | str | None = None,
+        owner_id: str | None = None,
     ) -> None:
+        owner_id = self._effective_owner(owner_id)
         try:
             self.storage.replace_session_and_clear_derived(
                 session,
                 expected_revision,
                 expected_generation=expected_generation,
+                owner_id=owner_id,
             )
         except PublishLeaseBusy as exc:
             raise ApiError(exc.code, exc.message, HTTPStatus.CONFLICT) from exc
@@ -452,7 +861,9 @@ class WorkbenchApp:
         *,
         expected_old_pipeline_artifact_hash: str | None,
         expected_old_result: dict[str, Any] | None,
+        owner_id: str | None = None,
     ) -> None:
+        owner_id = self._effective_owner(owner_id)
         try:
             self.storage.replace_pipeline_and_invalidate_result(
                 session.id,
@@ -461,7 +872,8 @@ class WorkbenchApp:
                 expected_frozen_hash=session.frozen_hash,
                 expected_old_pipeline_artifact_hash=expected_old_pipeline_artifact_hash,
                 expected_old_result=expected_old_result,
-                expected_generation=self._session_tokens.get(session.id),
+                expected_generation=self._token(session.id, owner_id),
+                owner_id=owner_id,
             )
         except PublishLeaseBusy as exc:
             raise ApiError(exc.code, exc.message, HTTPStatus.CONFLICT) from exc
@@ -474,9 +886,15 @@ class WorkbenchApp:
         except StorageError as exc:
             raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
 
-    def _load_pipeline(self, session_id: str, session: AuthoringSession) -> dict[str, Any] | None:
+    def _load_pipeline(
+        self,
+        session_id: str,
+        session: AuthoringSession,
+        owner_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        owner_id = self._effective_owner(owner_id)
         try:
-            pipeline = self.storage.load_document(session_id, "pipeline")
+            pipeline = self.storage.load_document(session_id, "pipeline", owner_id)
         except StorageError as exc:
             if exc.code == "P4_WORKBENCH_ARTIFACT_INVALID":
                 return None
@@ -491,12 +909,17 @@ class WorkbenchApp:
         return pipeline
 
     def _load_glific_result(
-        self, session_id: str, session: AuthoringSession, pipeline: dict[str, Any] | None
+        self,
+        session_id: str,
+        session: AuthoringSession,
+        pipeline: dict[str, Any] | None,
+        owner_id: str | None = None,
     ) -> dict[str, Any] | None:
+        owner_id = self._effective_owner(owner_id)
         if not pipeline:
             return None
         try:
-            stored = self.storage.load_document(session_id, "glific_result")
+            stored = self.storage.load_document(session_id, "glific_result", owner_id)
         except StorageError as exc:
             if exc.code == "P4_WORKBENCH_ARTIFACT_INVALID":
                 return None
@@ -517,12 +940,44 @@ class WorkbenchApp:
         result = stored.get("result")
         return result if isinstance(result, dict) else None
 
-    def _set_glific_progress(self, session_id: str, phase: str | None) -> None:
+    @staticmethod
+    def _load_glific_result_from_payload(
+        stored: dict[str, Any] | None,
+        session: AuthoringSession,
+        pipeline: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not stored or not pipeline:
+            return None
+        artifact_stage = next(
+            (
+                item
+                for item in pipeline.get("stages", [])
+                if item.get("name") == "engine3_glific_artifact"
+            ),
+            None,
+        )
+        if (
+            stored.get("session_revision") != session.revision
+            or stored.get("frozen_package_hash") != session.frozen_hash
+            or not artifact_stage
+            or stored.get("artifact_hash") != artifact_stage.get("canonical_hash")
+        ):
+            return None
+        result = stored.get("result")
+        return result if isinstance(result, dict) else None
+
+    def _set_glific_progress(
+        self,
+        session_id: str,
+        phase: str | None,
+        owner_id: str | None = None,
+    ) -> None:
+        key = (self._owner_key(self._effective_owner(owner_id)), session_id)
         with self._publish_guard:
             if phase is None:
-                self._glific_progress.pop(session_id, None)
+                self._glific_progress.pop(key, None)
             else:
-                self._glific_progress[session_id] = phase
+                self._glific_progress[key] = phase
 
     def _checkpoint(self, session: AuthoringSession) -> dict[str, Any] | None:
         if session.state is not SessionState.FROZEN:
@@ -562,44 +1017,135 @@ class WorkbenchApp:
             ),
         }
 
-    def list_sessions(self) -> dict[str, Any]:
-        """Return safe sidebar summaries for locally persisted workbench flows."""
-
-        summaries: list[tuple[int, dict[str, Any]]] = []
-        for sort_key, session in self.storage.list_sessions():
-            keywords = (
-                [item.value for item in session.flow_trigger_metadata.keywords]
-                if session.flow_trigger_metadata
-                else []
-            )
-            summaries.append((
-                sort_key,
+    @staticmethod
+    def _session_summary(
+        session: AuthoringSession,
+        *,
+        shared: bool,
+        sort_key: int,
+        published: bool = False,
+    ) -> tuple[int, dict[str, Any]]:
+        keywords = (
+            [item.value for item in session.flow_trigger_metadata.keywords]
+            if session.flow_trigger_metadata
+            else []
+        )
+        return sort_key, {
+            "id": session.id,
+            "title": session.title,
+            "state": session.state.value,
+            "revision": session.revision,
+            "segment_count": len(
                 {
-                    "id": session.id,
-                    "title": session.title,
-                    "state": session.state.value,
-                    "revision": session.revision,
-                    "segment_count": len(
-                        {
-                            node.source_statement.strip()
-                            for node in session.nodes
-                            if node.source_statement.strip()
-                        }
-                    ),
-                    "keywords": keywords,
-                    "published": self._load_glific_result(
-                        session.id,
+                    node.source_statement.strip()
+                    for node in session.nodes
+                    if node.source_statement.strip()
+                }
+            ),
+            "keywords": keywords,
+            "published": published,
+            "shared": shared,
+            "read_only": shared,
+        }
+
+    @staticmethod
+    def _compact_public_pipeline(pipeline: Any) -> Any:
+        """Keep public review status small; downloads remain server-backed."""
+
+        if not isinstance(pipeline, dict):
+            return pipeline
+        compact = dict(pipeline)
+        compact["stages"] = [
+            {key: value for key, value in stage.items() if key != "json"}
+            for stage in pipeline.get("stages", [])
+            if isinstance(stage, dict)
+        ]
+        checkpoint = compact.get("frozen_semantic_checkpoint")
+        if isinstance(checkpoint, dict):
+            compact["frozen_semantic_checkpoint"] = {
+                key: value
+                for key, value in checkpoint.items()
+                if key not in {"authored_mermaid", "presentation_mermaid"}
+            }
+        return compact
+
+    def list_sessions(
+        self,
+        owner_id: str | None = None,
+        *,
+        include_legacy: bool | None = None,
+    ) -> dict[str, Any]:
+        """Return shared templates plus the caller's private flow summaries."""
+
+        owner_id = self._effective_owner(owner_id)
+        if include_legacy is None:
+            include_legacy = self.test_mode
+        try:
+            shared_publications = {
+                session.id: load_preloaded_publication(session)
+                for session in self._preloaded_sessions.values()
+            }
+        except PreloadedPublicationError as exc:
+            raise ApiError(
+                "P4_PRELOADED_PUBLICATION_INVALID",
+                "The shared publication is unavailable.",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
+        summaries: list[tuple[int, dict[str, Any]]] = [
+            self._session_summary(
+                session,
+                shared=True,
+                sort_key=-1,
+                published=bool(shared_publications[session.id].get("glific_publish")),
+            )
+            for session in self._preloaded_sessions.values()
+        ]
+        storage_owner = owner_id if owner_id is not None or include_legacy else "__no_legacy__"
+        if hasattr(self.storage, "list_session_summaries"):
+            for sort_key, summary in self.storage.list_session_summaries(storage_owner):
+                summary["shared"] = False
+                summary["read_only"] = False
+                summaries.append((sort_key, summary))
+            if self.public_publisher_id:
+                public_ids = {item[1]["id"] for item in summaries}
+                for sort_key, summary in self.storage.list_session_summaries(
+                    self.public_publisher_id, published_only=True
+                ):
+                    if summary["id"] in public_ids:
+                        if owner_id == self.public_publisher_id:
+                            continue
+                        for _, existing in summaries:
+                            if existing["id"] == summary["id"]:
+                                existing["shared"] = True
+                                existing["read_only"] = True
+                                existing["published"] = True
+                                break
+                        continue
+                    summary["shared"] = True
+                    summary["read_only"] = True
+                    summary["published"] = True
+                    summaries.append((sort_key, summary))
+        else:
+            for sort_key, session in self.storage.list_sessions(storage_owner):
+                summaries.append(
+                    self._session_summary(
                         session,
-                        self._load_pipeline(session.id, session),
+                        shared=False,
+                        sort_key=sort_key,
+                        published=self._load_glific_result(
+                            session.id,
+                            session,
+                            self._load_pipeline(session.id, session, owner_id),
+                            owner_id,
+                        )
+                        is not None,
                     )
-                    is not None,
-                },
-            ))
+                )
         summaries.sort(key=lambda item: (-item[0], item[1]["title"].casefold(), item[1]["id"]))
         return {"sessions": [item[1] for item in summaries]}
 
     @staticmethod
-    def settings() -> dict[str, Any]:
+    def _legacy_settings() -> dict[str, Any]:
         """Expose only non-secret Glific connection details to the local UI."""
 
         raw_base = (
@@ -613,25 +1159,33 @@ class WorkbenchApp:
                 glific_url, _ = _normalize_base_url(raw_base)
             except GlificClientError:
                 glific_url = None
-        mobile_configured = bool(os.environ.get("GLIFIC_PHONE", "").strip())
         password_configured = bool(os.environ.get("GLIFIC_PASSWORD", "").strip())
+        mobile_number = _mask_mobile(os.environ.get("GLIFIC_PHONE", "").strip())
         try:
             GlificConfig.from_environment()
         except GlificClientError:
             return {
                 "configured": False,
                 "glific_url": glific_url,
-                "mobile_number": "Configured" if mobile_configured else "Not configured",
-                "password": "******" if password_configured else "Not configured",
+                "mobile_number": mobile_number,
+                "password": "*****" if password_configured else "Not configured",
             }
         return {
             "configured": True,
             "glific_url": glific_url,
-            "mobile_number": "Configured" if mobile_configured else "Not configured",
-            "password": "******",
+            "mobile_number": mobile_number,
+            "password": "*****",
         }
 
-    def view(self, session: AuthoringSession) -> dict[str, Any]:
+    def view(
+        self,
+        session: AuthoringSession,
+        owner_id: str | None = None,
+        *,
+        shared: bool = False,
+        shared_publication: dict[str, object] | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         review_text = None
         expanded = None
         if session.state in {SessionState.READY_FOR_REVIEW, SessionState.FROZEN}:
@@ -652,38 +1206,102 @@ class WorkbenchApp:
             else None
         )
         confirmation = None
-        stored = self.storage.load_document(session.id, "confirmation")
-        if stored is not None and stored.get("revision") == session.revision:
-            confirmation = {
-                "revision": stored["revision"],
-                "hash": stored["hash"],
-            }
-        pipeline = self._load_pipeline(session.id, session)
+        pipeline = None
+        glific_publish = None
+        if not shared:
+            documents = self.storage.load_view_documents(session.id, owner_id)
+            stored = documents.get("confirmation")
+            if stored is not None and stored.get("revision") == session.revision:
+                confirmation = {
+                    "revision": stored["revision"],
+                    "hash": stored["hash"],
+                }
+            candidate_pipeline = documents.get("pipeline")
+            pipeline = (
+                candidate_pipeline
+                if candidate_pipeline is not None
+                and candidate_pipeline.get("session_revision") == session.revision
+                and candidate_pipeline.get("frozen_package_hash") == session.frozen_hash
+                and candidate_pipeline.get("all_stages_passed") is True
+                else None
+            )
+            glific_publish = (
+                self._load_glific_result_from_payload(
+                    documents.get("glific_result"), session, pipeline
+                )
+                if pipeline
+                else None
+            )
+        elif shared_publication is not None:
+            pipeline = self._compact_public_pipeline(shared_publication.get("pipeline"))
+            glific_publish = shared_publication.get("glific_publish")
+        else:
+            raise ApiError(
+                "P4_PRELOADED_PUBLICATION_INVALID",
+                "The shared publication is unavailable.",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
         return {
             "session": session.model_dump(mode="json"),
+            "shared": shared,
+            "read_only": shared,
             "current_question": current_question,
             "segment_remaining_count": len(session.queued_proposals),
             "open_positions": [item.model_dump(mode="json") for item in session.open_positions],
             "live_authored_mermaid": authored,
             "live_presentation_mermaid": presentation,
-            "review_text": review_text,
-            "expanded_mermaid": expanded,
+            "review_text": review_text if not shared else None,
+            "expanded_mermaid": expanded if not shared else None,
             "prepared_confirmation": confirmation,
             "checkpoint": self._checkpoint(session),
             "pipeline": pipeline,
-            "glific_publish": self._load_glific_result(session.id, session, pipeline),
-            "glific_publish_status": self._glific_progress.get(session.id),
+            "glific_publish": glific_publish,
+            "glific_publish_status": self._glific_progress.get(
+                (self._owner_key(owner_id), session.id)
+            ),
         }
 
-    def start(self, body: dict[str, Any]) -> dict[str, Any]:
+    def view_shared(self, session_id: str) -> dict[str, Any]:
+        session_id = _safe_session_id(session_id)
+        session = self._preloaded_sessions.get(session_id)
+        if session is None:
+            raise ApiError("P4_SESSION_NOT_FOUND", "Session does not exist.", HTTPStatus.NOT_FOUND)
+        try:
+            publication = load_preloaded_publication(session)
+        except PreloadedPublicationError as exc:
+            raise ApiError(
+                "P4_PRELOADED_PUBLICATION_INVALID",
+                "The shared publication is unavailable.",
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            ) from exc
+        return self.view(
+            session.model_copy(deep=True),
+            None,
+            shared=True,
+            shared_publication=publication,
+        )
+
+    def start(self, body: dict[str, Any], owner_id: str | None = None) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(body.get("session_id"))
+        self._require_editable_session(session_id)
+        if owner_id is not None and not self.test_mode and not self._credential_values(owner_id).get("openai_api_key"):
+            raise ApiError(
+                "P4_SEMANTIC_CREDENTIAL_MISSING",
+                "Save an OpenAI API key in Settings before authoring a flow.",
+                HTTPStatus.CONFLICT,
+            )
         title = _safe_title(body.get("title"))
         reset = bool(body.get("reset"))
         original_brief = body.get("original_brief")
         if original_brief is not None and not isinstance(original_brief, str):
             raise ApiError("P4_ORIGINAL_BRIEF_INVALID", "Original brief must be text.")
-        with self._lock(session_id):
-            existing = self._load_session(session_id) if self.storage.session_exists(session_id) else None
+        with self._lock(session_id, owner_id):
+            existing = (
+                self._load_session(session_id, owner_id)
+                if self.storage.session_exists(session_id, owner_id)
+                else None
+            )
             if existing and not reset:
                 raise ApiError("P4_SESSION_EXISTS", "Use reset to replace the existing session.", HTTPStatus.CONFLICT)
             if existing:
@@ -699,29 +1317,37 @@ class WorkbenchApp:
                 session,
                 existing.revision if existing else None,
                 expected_generation=(
-                    self._session_tokens.get(session_id) if existing else None
+                    self._token(session_id, owner_id) if existing else None
                 ),
+                owner_id=owner_id,
             )
-            return self.view(session)
+            return self.view(session, owner_id)
 
-    def propose(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def propose(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
+        self._require_editable_session(session_id)
         statement = body.get("statement")
         if not isinstance(statement, str) or not statement.strip():
             raise ApiError("P4_INSTRUCTION_REQUIRED", "Instruction must be non-empty.")
-        with self._lock(session_id):
-            session = self._load_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
             before = session.revision
             try:
-                updated = self.service.propose(session, statement.strip())
+                updated = self._service_for(owner_id).propose(session, statement.strip())
             except Exception as exc:
                 error = _api_error_from_exception(exc)
                 if error.code == "P4_TRANSLATION_AMBIGUOUS":
                     error.available_branches = _open_branch_labels(session)
                 raise error from exc
-            self._save(updated, before)
-            return self.view(updated)
+            self._save(updated, before, owner_id)
+            return self.view(updated, owner_id)
 
     @staticmethod
     def _typed_answer(session: AuthoringSession, body: dict[str, Any]) -> QuestionAnswer:
@@ -764,24 +1390,38 @@ class WorkbenchApp:
             answered_at=body.get("answered_at"),
         )
 
-    def answer(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def answer(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
-        with self._lock(session_id):
-            session = self._load_session(session_id)
+        self._require_editable_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
             before = session.revision
             answer = self._typed_answer(session, body)
             try:
-                updated = self.service.answer(session, answer)
+                updated = self._service_for(owner_id).answer(session, answer)
             except Exception as exc:
                 raise _api_error_from_exception(exc) from exc
-            self._save(updated, before)
-            return self.view(updated)
+            self._save(updated, before, owner_id)
+            return self.view(updated, owner_id)
 
-    def prepare(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def prepare(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
-        with self._lock(session_id):
-            session = self._load_session(session_id)
+        self._require_editable_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
             try:
                 package, digest = prepare_confirmation(session, confirmed_by="workbench-user")
@@ -794,7 +1434,8 @@ class WorkbenchApp:
                     {"revision": session.revision, "hash": digest, "package": package},
                     expected_revision=session.revision,
                     expected_frozen_hash=session.frozen_hash,
-                    expected_generation=self._session_tokens.get(session_id),
+                    expected_generation=self._token(session_id, owner_id),
+                    owner_id=owner_id,
                 )
             except StorageRevisionConflict as exc:
                 raise ApiError(
@@ -804,20 +1445,27 @@ class WorkbenchApp:
                 ) from exc
             except StorageError as exc:
                 raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-            response = self.view(session)
+            response = self.view(session, owner_id)
             response["prepared_package"] = package
             response["prepared_hash"] = digest
             return response
 
-    def freeze(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def freeze(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
+        self._require_editable_session(session_id)
         confirmed_hash = body.get("confirmed_hash")
         if not isinstance(confirmed_hash, str):
             raise ApiError("P4_CONFIRMATION_HASH_REQUIRED", "Confirmed hash is required.")
-        with self._lock(session_id):
-            session = self._load_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
-            prepared = self.storage.load_document(session_id, "confirmation")
+            prepared = self.storage.load_document(session_id, "confirmation", owner_id)
             if prepared is None:
                 raise ApiError("P4_CONFIRMATION_STALE", "Prepared confirmation is stale.", HTTPStatus.CONFLICT)
             if prepared.get("revision") != session.revision:
@@ -831,7 +1479,7 @@ class WorkbenchApp:
                 updated = freeze(session, confirmed_hash, prepared["package"])
             except Exception as exc:
                 raise _api_error_from_exception(exc) from exc
-            self._save(updated, session.revision)
+            self._save(updated, session.revision, owner_id)
             try:
                 self.storage.delete_document(
                     session_id,
@@ -839,6 +1487,7 @@ class WorkbenchApp:
                     expected_document_revision=session.revision,
                     expected_document_frozen_hash=confirmed_hash,
                     expected_document_payload=prepared,
+                    owner_id=owner_id,
                 )
             except StorageRevisionConflict as exc:
                 raise ApiError(
@@ -848,16 +1497,23 @@ class WorkbenchApp:
                 ) from exc
             except StorageError as exc:
                 raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-            return self.view(updated)
+            return self.view(updated, owner_id)
 
-    def compile(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def compile(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
-        with self._lock(session_id):
-            session = self._load_session(session_id)
+        self._require_editable_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
             if session.state is not SessionState.FROZEN:
                 raise ApiError("P4_COMPILE_REQUIRES_FROZEN_SESSION", "Compile is available only after freeze.", HTTPStatus.CONFLICT)
-            prior_pipeline = self._load_pipeline(session_id, session)
+            prior_pipeline = self._load_pipeline(session_id, session, owner_id)
             prior_artifact_hash = None
             if prior_pipeline:
                 prior_stage = next(
@@ -874,7 +1530,7 @@ class WorkbenchApp:
             prior_result = None
             if prior_artifact_hash:
                 try:
-                    candidate = self.storage.load_document(session_id, "glific_result")
+                    candidate = self.storage.load_document(session_id, "glific_result", owner_id)
                 except StorageError as exc:
                     if exc.code != "P4_WORKBENCH_ARTIFACT_INVALID":
                         raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
@@ -895,26 +1551,35 @@ class WorkbenchApp:
                 result,
                 expected_old_pipeline_artifact_hash=prior_artifact_hash,
                 expected_old_result=prior_result,
+                owner_id=owner_id,
             )
-            return self.view(session)
+            return self.view(session, owner_id)
 
-    def publish(self, session_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    def publish(
+        self,
+        session_id: str,
+        body: dict[str, Any],
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
         """Explicitly push the passed pipeline artifact to Glific once."""
 
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
+        self._require_editable_session(session_id)
         lease_owner = uuid.uuid4().hex
         lease_acquired = False
+        publish_key = (self._owner_key(owner_id), session_id)
         with self._publish_guard:
-            if session_id in self._glific_inflight:
+            if publish_key in self._glific_inflight:
                 raise ApiError(
                     "P4_GLIFIC_PUBLISH_IN_PROGRESS",
                     "A Glific publish is already in progress for this flow. Wait for it to finish.",
                     HTTPStatus.CONFLICT,
                 )
-            self._glific_inflight.add(session_id)
+            self._glific_inflight.add(publish_key)
         try:
-            with self._lock(session_id):
-                session = self._load_session(session_id)
+            with self._lock(session_id, owner_id):
+                session = self._load_session(session_id, owner_id)
                 self._require_revision(session, body)
                 if session.state is not SessionState.FROZEN:
                     raise ApiError(
@@ -922,7 +1587,7 @@ class WorkbenchApp:
                         "Lock the flow before pushing it to Glific.",
                         HTTPStatus.CONFLICT,
                     )
-                pipeline = self._load_pipeline(session_id, session)
+                pipeline = self._load_pipeline(session_id, session, owner_id)
                 if not pipeline or pipeline.get("all_stages_passed") is not True:
                     raise ApiError(
                         "P4_GLIFIC_PIPELINE_NOT_READY",
@@ -943,7 +1608,7 @@ class WorkbenchApp:
                     )
                 expected_revision = session.revision
                 expected_frozen_hash = session.frozen_hash
-                expected_generation = self._session_tokens.get(session_id)
+                expected_generation = self._token(session_id, owner_id)
             try:
                 self.storage.acquire_publish_lease(
                     session_id,
@@ -953,6 +1618,7 @@ class WorkbenchApp:
                     expected_revision=expected_revision,
                     expected_frozen_hash=expected_frozen_hash,
                     expected_generation=expected_generation,
+                    owner_id=owner_id,
                 )
                 lease_acquired = True
             except PublishLeaseBusy as exc:
@@ -965,19 +1631,40 @@ class WorkbenchApp:
                 ) from exc
             except StorageError as exc:
                 raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-            self._set_glific_progress(session_id, "connecting")
+            self._set_glific_progress(session_id, "connecting", owner_id)
             try:
-                client = self._glific_client_factory()
+                if owner_id is None:
+                    client = self._glific_client_factory()
+                else:
+                    values = self._credential_values(owner_id)
+                    missing = [
+                        field
+                        for field in ("glific_base_url", "mobile_number", "glific_password")
+                        if not values.get(field)
+                    ]
+                    if missing:
+                        raise ApiError(
+                            "P4_GLIFIC_CONFIGURATION_MISSING",
+                            "Connect your Glific account in Settings before publishing.",
+                            HTTPStatus.CONFLICT,
+                        )
+                    client = GlificClient.from_values(
+                        values["glific_base_url"],
+                        values["mobile_number"],
+                        values["glific_password"],
+                    )
                 result = _safe_glific_result(
                     client.publish_artifact(
                         artifact,
-                        progress=lambda phase: self._set_glific_progress(session_id, phase),
+                        progress=lambda phase: self._set_glific_progress(
+                            session_id, phase, owner_id
+                        ),
                     )
                 )
             except Exception as exc:
                 raise _api_error_from_exception(exc, status=HTTPStatus.BAD_GATEWAY) from exc
-            with self._lock(session_id):
-                current = self._load_session(session_id)
+            with self._lock(session_id, owner_id):
+                current = self._load_session(session_id, owner_id)
                 if (
                     current.revision != expected_revision
                     or current.frozen_hash != expected_frozen_hash
@@ -1005,6 +1692,7 @@ class WorkbenchApp:
                         artifact_hash=artifact_hash,
                         owner=lease_owner,
                         expected_generation=expected_generation,
+                        owner_id=owner_id,
                     )
                 except StorageRevisionConflict as exc:
                     raise ApiError(
@@ -1014,23 +1702,32 @@ class WorkbenchApp:
                     ) from exc
                 except StorageError as exc:
                     raise ApiError(exc.code, exc.message, HTTPStatus.INTERNAL_SERVER_ERROR) from exc
-                self._set_glific_progress(session_id, None)
-                return self.view(current)
+                self._set_glific_progress(session_id, None, owner_id)
+                return self.view(current, owner_id)
         finally:
-            self._set_glific_progress(session_id, None)
+            self._set_glific_progress(session_id, None, owner_id)
             if lease_acquired:
                 try:
-                    self.storage.release_publish_lease(session_id, lease_owner)
+                    self.storage.release_publish_lease(
+                        session_id, lease_owner, owner_id
+                    )
                 except StorageError:
                     pass
             with self._publish_guard:
-                self._glific_inflight.discard(session_id)
+                self._glific_inflight.discard(publish_key)
 
-    def download(self, session_id: str, kind: str) -> tuple[bytes, str, str]:
+    def download(
+        self,
+        session_id: str,
+        kind: str,
+        owner_id: str | None = None,
+    ) -> tuple[bytes, str, str]:
+        owner_id = self._effective_owner(owner_id)
         session_id = _safe_session_id(session_id)
-        with self._lock(session_id):
-            session = self._load_session(session_id)
-            pipeline = self._load_pipeline(session_id, session)
+        self._require_editable_session(session_id)
+        with self._lock(session_id, owner_id):
+            session = self._load_session(session_id, owner_id)
+            pipeline = self._load_pipeline(session_id, session, owner_id)
             if kind == "frozen-package":
                 if not session.frozen_package:
                     raise ApiError("P4_FROZEN_PACKAGE_MISSING", "No frozen package is available.", HTTPStatus.CONFLICT)
@@ -1087,6 +1784,7 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         status: int = HTTPStatus.OK,
         *,
         request_id: str | None = None,
+        set_cookies: list[str] | None = None,
     ) -> None:
         raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -1095,8 +1793,69 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         if request_id:
             self.send_header("X-AutoGlific-Request-ID", request_id)
+        for value in set_cookies or []:
+            self.send_header("Set-Cookie", value)
         self.end_headers()
         self.wfile.write(raw)
+
+    def _cookies(self) -> dict[str, str]:
+        parsed = SimpleCookie()
+        parsed.load(self.headers.get("Cookie", ""))
+        return {key: morsel.value for key, morsel in parsed.items()}
+
+    def _headers(self) -> dict[str, str]:
+        return {key.lower(): value for key, value in self.headers.items()}
+
+    def _principal(self) -> Principal:
+        try:
+            return self.app.authenticate(self._headers(), self._cookies())
+        except AuthError as exc:
+            raise _api_error_from_exception(exc) from exc
+
+    def _require_csrf(self) -> Principal:
+        try:
+            return self.app.require_csrf(self._headers(), self._cookies())
+        except AuthError as exc:
+            raise _api_error_from_exception(exc) from exc
+
+    def _auth_cookies(self, result: AuthResult) -> list[str]:
+        values: list[str] = []
+        if result.session_token:
+            values.append(
+                serialize_set_cookie(
+                    AUTH_SESSION_COOKIE,
+                    result.session_token,
+                    secure=self.app.cookie_secure,
+                    http_only=True,
+                    max_age=AUTH_SESSION_SECONDS,
+                )
+            )
+        if result.csrf_token:
+            values.append(
+                serialize_set_cookie(
+                    CSRF_COOKIE,
+                    result.csrf_token,
+                    secure=self.app.cookie_secure,
+                    http_only=False,
+                    max_age=AUTH_SESSION_SECONDS,
+                )
+            )
+        if result.clear_session:
+            values.extend(
+                [
+                    serialize_delete_cookie(
+                        AUTH_SESSION_COOKIE,
+                        secure=self.app.cookie_secure,
+                        http_only=True,
+                    ),
+                    serialize_delete_cookie(
+                        CSRF_COOKIE,
+                        secure=self.app.cookie_secure,
+                        http_only=False,
+                    ),
+                ]
+            )
+        return values
 
     def _send_error(self, error: ApiError) -> None:
         _LOGGER.warning(
@@ -1140,13 +1899,14 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             if path == "/api/health":
-                self._send_json({"status": "ok", "data_root": str(DATA_ROOT)})
+                self._send_json({"status": "ok"})
                 return
-            if path == "/api/sessions":
-                self._send_json(self.app.list_sessions())
+            if path == "/api/auth/csrf":
+                result = self.app.auth_csrf(self._cookies())
+                self._send_json(result.payload, set_cookies=self._auth_cookies(result))
                 return
-            if path == "/api/settings":
-                self._send_json(self.app.settings())
+            if path == "/api/auth/me":
+                self._send_json(self.app.auth_me(self._headers(), self._cookies()))
                 return
             if path == "/" or path == "/index.html":
                 self._send_static("index.html", "text/html; charset=utf-8")
@@ -1162,18 +1922,47 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
                 content_type = "text/javascript; charset=utf-8" if name.endswith(".js") else "text/css; charset=utf-8"
                 self._send_static(name, content_type)
                 return
+            if path == "/api/sessions":
+                try:
+                    principal = self.app.authenticate(self._headers(), self._cookies())
+                except AuthError as exc:
+                    if exc.code not in {"P4_AUTH_REQUIRED", "P4_AUTH_INVALID_SESSION"}:
+                        raise _api_error_from_exception(exc) from exc
+                    principal = None
+                owner_id = principal.user_id if principal is not None and not self.app.test_mode else None
+                self._send_json(
+                    self.app.list_sessions(owner_id, include_legacy=self.app.test_mode)
+                )
+                return
+            if path == "/api/settings":
+                principal = self._principal()
+                owner_id = principal.user_id if not self.app.test_mode else None
+                self._send_json(self.app.settings(owner_id))
+                return
             parts = [part for part in path.split("/") if part]
             if len(parts) == 3 and parts[0] == "api" and parts[1] == "sessions":
                 session_id = _safe_session_id(parts[2])
-                with self.app._lock(session_id):
-                    self._send_json(self.app.view(self.app._load_session(session_id)))
+                if self.app.is_shared_session(session_id):
+                    self._send_json(self.app.view_shared(session_id))
+                    return
+                principal = self._principal()
+                owner_id = principal.user_id if not self.app.test_mode else None
+                with self.app._lock(session_id, owner_id):
+                    self._send_json(
+                        self.app.view(
+                            self.app._load_session(session_id, owner_id), owner_id
+                        )
+                    )
                 return
             if len(parts) == 5 and parts[:2] == ["api", "sessions"] and parts[3] == "download":
-                body, content_type, filename = self.app.download(parts[2], parts[4])
+                principal = self._principal()
+                owner_id = principal.user_id if not self.app.test_mode else None
+                body, content_type, filename = self.app.download(parts[2], parts[4], owner_id)
                 self.send_response(HTTPStatus.OK)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
                 self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(body)
                 return
@@ -1194,7 +1983,13 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        if name.startswith("vendor/"):
+            cache_control = "public, max-age=31536000, immutable"
+        elif name == "index.html":
+            cache_control = "public, max-age=0, must-revalidate, s-maxage=60"
+        else:
+            cache_control = "public, max-age=0, must-revalidate, s-maxage=31536000"
+        self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(body)
 
@@ -1203,9 +1998,33 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
             parsed = urlsplit(self.path)
             path = unquote(parsed.path)
             body = self._body()
+            headers = self._headers()
+            cookies = self._cookies()
+            if path in {"/api/auth/register", "/api/auth/login"}:
+                result = (
+                    self.app.auth_register(body, headers=headers, cookies=cookies)
+                    if path.endswith("/register")
+                    else self.app.auth_login(
+                        body,
+                        headers=headers,
+                        cookies=cookies,
+                        client_ip=self.client_address[0] if self.client_address else None,
+                    )
+                )
+                self._send_json(result.payload, set_cookies=self._auth_cookies(result))
+                return
+            if path == "/api/auth/logout":
+                result = self.app.auth_logout(headers=headers, cookies=cookies)
+                self._send_json(result.payload, set_cookies=self._auth_cookies(result))
+                return
+            principal = self._require_csrf()
+            owner_id = principal.user_id if not self.app.test_mode else None
+            if path == "/api/settings":
+                self._send_json(self.app.save_settings(owner_id or principal.user_id, body))
+                return
             parts = [part for part in path.split("/") if part]
             if path == "/api/sessions":
-                self._send_json(self.app.start(body), HTTPStatus.CREATED)
+                self._send_json(self.app.start(body, owner_id), HTTPStatus.CREATED)
                 return
             if len(parts) == 4 and parts[:2] == ["api", "sessions"]:
                 session_id, action = parts[2], parts[3]
@@ -1219,7 +2038,7 @@ class WorkbenchRequestHandler(BaseHTTPRequestHandler):
                 }
                 if action not in actions:
                     raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", HTTPStatus.NOT_FOUND)
-                self._send_json(actions[action](session_id, body))
+                self._send_json(actions[action](session_id, body, owner_id))
                 return
             raise ApiError("P4_ROUTE_NOT_FOUND", "Route not found.", HTTPStatus.NOT_FOUND)
         except ApiError as exc:

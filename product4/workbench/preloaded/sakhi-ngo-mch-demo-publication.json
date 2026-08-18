@@ -1,0 +1,13 @@
+{
+  "schema_version": "product4-workbench-glific-publish-1.0",
+  "session_id": "flow-msqh0ezo-pot4f",
+  "session_revision": 36,
+  "frozen_package_hash": "4b332b2bcf40cb48731f5a8c4febc5893ea4a464fbe37557838b5b520f428a11",
+  "artifact_hash": "37f081434063f644a758e4034f907b499beeb117aa552b5ad89ed486320a632b",
+  "result": {
+    "flow_id": "41600",
+    "flow_uuid": "5244a47c-49df-5d65-b045-cc884834376e",
+    "flow_name": "Sakhi NGO MCH Demo",
+    "status": "published"
+  }
+}

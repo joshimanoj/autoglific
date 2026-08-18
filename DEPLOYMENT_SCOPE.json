@@ -11,6 +11,10 @@
     "credentials",
     "caches"
   ],
+  "preloaded_template_files": [
+    "workbench/preloaded/sakhi-ngo-mch-demo.json",
+    "workbench/preloaded/sakhi-ngo-mch-demo-publication.json"
+  ],
   "product2_runtime_files": [
     "backend/app/__init__.py",
     "backend/app/config.py",

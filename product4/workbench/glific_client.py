@@ -201,6 +201,34 @@ class GlificClient:
     def from_environment(cls) -> GlificClient:
         return cls(GlificConfig.from_environment())
 
+    @classmethod
+    def from_values(
+        cls,
+        base_url: str,
+        phone: str,
+        password: str,
+        *,
+        timeout_seconds: float = 30.0,
+        transport: Transport | None = None,
+    ) -> GlificClient:
+        """Build a client from already validated per-user settings."""
+
+        ui_base_url, api_base_url = _normalize_base_url(base_url)
+        if not phone.strip() or not password.strip():
+            raise GlificClientError(
+                "P4_GLIFIC_CONFIGURATION_MISSING",
+                "Glific publishing is not configured.",
+            )
+        if not 1 <= timeout_seconds <= 120:
+            raise GlificClientError(
+                "P4_GLIFIC_CONFIGURATION_INVALID",
+                "Glific timeout must be between 1 and 120 seconds.",
+            )
+        return cls(
+            GlificConfig(ui_base_url, api_base_url, phone.strip(), password, timeout_seconds),
+            transport=transport,
+        )
+
     def _urlopen_transport(
         self,
         method: str,
