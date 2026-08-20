@@ -175,8 +175,8 @@ html[data-initial-session] .app[data-view="startup"] #publishing-panel { display
 .button.destructive { border: 1px solid var(--red); color: white; background: var(--red); }
 .button.destructive:not(:disabled):hover { background: #96313a; }
 
-.authoring-view { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(460px, 1fr) minmax(390px, 450px); }
-.conversation { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr) auto; border-right: 1px solid var(--line); background: white; }
+.authoring-view { grid-column: 2; grid-row: 2; min-width: 0; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr); }
+.conversation { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0,1fr) auto; overflow: hidden; background: #f7f9fc; }
 .conversation-header, .stage-header { min-height: 78px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 17px 26px; border-bottom: 1px solid var(--line); }
 .conversation-header h1, .stage-header h1 { margin: 0; font-size: 23px; font-weight: 500; letter-spacing: -.03em; }
 .conversation-header p, .stage-header p { margin: 5px 0 0; color: var(--muted); font-size: 13px; }
@@ -195,7 +195,7 @@ html[data-initial-session] .app[data-view="startup"] #publishing-panel { display
 .alert-retry { margin-top: 10px; }
 .alert-close { position: absolute; top: 8px; right: 9px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; color: currentColor; background: transparent; font-size: 19px; line-height: 1; }
 .alert-close:hover, .alert-close:focus-visible { background: rgba(20, 47, 80, .08); outline: 2px solid currentColor; outline-offset: 1px; }
-.thread { min-height: 0; overflow: auto; padding: 30px max(28px, calc((100% - 760px) / 2)); scroll-behavior: smooth; }
+.thread { min-height: 0; overflow: auto; padding: 42px max(28px, calc((100% - 820px) / 2)); scroll-behavior: smooth; }
 .turn { display: flex; margin-bottom: 20px; opacity: 1; }
 .turn.user { justify-content: flex-end; }
 .bubble { min-width: 0; max-width: 78%; padding: 9px 12px; border-radius: 18px; background: #f3f6fa; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
@@ -222,8 +222,11 @@ html[data-initial-session] .app[data-view="startup"] #publishing-panel { display
 .flow-loading p { margin: 0; font-size: 13px; line-height: 1.5; }
 .flow-loading-spinner { width: 25px; height: 25px; }
 
-.composer-shell { padding: 15px 28px 22px; }
-.composer, .answer-composer { min-width: 0; max-width: 760px; margin: 0 auto; padding: 13px 14px; border: 1px solid #c7d3e3; border-radius: 17px; background: white; overflow-wrap: anywhere; }
+.composer-shell { max-height: min(62vh, 680px); overflow: auto; padding: 18px 28px 30px; background: #f7f9fc; }
+.composer, .answer-composer { min-width: 0; max-width: 820px; margin: 0 auto; padding: 18px 20px; border: 1px solid #c7d3e3; border-radius: 18px; background: white; box-shadow: 0 14px 36px rgba(31, 56, 94, .08); overflow-wrap: anywhere; }
+.prose-editor-heading { margin-bottom: 16px; }
+.prose-editor-heading h2 { margin: 0; font-size: 20px; font-weight: 550; letter-spacing: -.02em; }
+.prose-editor-heading p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
 .composer textarea, .answer-composer textarea { display: block; min-width: 0; width: 100%; min-height: 66px; padding: 3px; border: 0; outline: 0; resize: vertical; color: inherit; font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 9px; color: #7b8799; font-size: 11px; }
 .answer-footer { justify-content: flex-end; }
@@ -238,6 +241,50 @@ html[data-initial-session] .app[data-view="startup"] #publishing-panel { display
 .question-prompt small { color: var(--amber); font-size: 11px; font-weight: 500; }
 .answer-composer input, .answer-composer textarea, .dialog input { min-width: 0; max-width: 100%; width: 100%; padding: 12px 13px; border: 1px solid #cbd3df; border-radius: 10px; color: inherit; background: white; font-size: 14px; }
 .answer-composer #answer-control .question-answer-text { min-height: 66px; padding: 3px 0; border: 0; border-radius: 0; background: transparent; font-size: 14px; line-height: 1.5; outline: 0; resize: vertical; }
+.atomic-question-batch { display: grid; gap: 16px; }
+.atomic-question { display: grid; gap: 7px; color: var(--ink); font-size: 14px; line-height: 1.45; }
+.atomic-question textarea { min-height: 72px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: white; color: var(--ink); font: inherit; resize: vertical; }
+#authoring-view #save-flow, #authoring-view #review-flow { display: none; }
+.workspace-eyebrow { display: block; margin-bottom: 5px; color: var(--blue); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.atomic-progress { display: flex; align-items: center; justify-content: center; padding: 15px 28px; border-bottom: 1px solid var(--line); background: white; }
+.atomic-progress-step { display: flex; align-items: center; gap: 8px; color: #9aa5b5; font-size: 12px; }
+.atomic-progress-step > span { display: grid; width: 25px; height: 25px; place-items: center; border: 1px solid #d2dae6; border-radius: 50%; background: white; font-size: 11px; }
+.atomic-progress-step.active { color: var(--blue); }
+.atomic-progress-step.active > span { border-color: var(--blue); color: white; background: var(--blue); }
+.atomic-progress-step.done { color: var(--green); }
+.atomic-progress-step.done > span { border-color: var(--green); color: white; background: var(--green); }
+.atomic-progress-line { width: min(9vw, 96px); height: 1px; margin: 0 12px; background: #dce3ed; }
+.atomic-empty { max-width: 720px; margin: 0 auto; padding: 46px 42px; border: 1px solid #dce3ed; border-radius: 22px; background: white; box-shadow: 0 18px 48px rgba(31, 56, 94, .07); text-align: center; }
+.atomic-empty-mark { display: grid; width: 46px; height: 46px; margin: 0 auto 17px; place-items: center; border-radius: 14px; color: white; background: linear-gradient(135deg, var(--blue), #7256d8); font-size: 21px; }
+.atomic-empty h2, .atomic-status-card h2 { margin: 0 0 8px; color: var(--ink); font-size: 24px; font-weight: 550; letter-spacing: -.025em; }
+.atomic-empty p, .atomic-status-card p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.65; }
+.atomic-writing-guide { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 24px; }
+.atomic-writing-guide span { padding: 7px 11px; border-radius: 999px; color: #596980; background: #f0f4f9; font-size: 11px; }
+.atomic-status-card { display: flex; max-width: 720px; margin: 38px auto 0; align-items: flex-start; gap: 17px; padding: 25px 27px; border: 1px solid #d9e2ef; border-radius: 18px; background: white; box-shadow: 0 14px 38px rgba(31, 56, 94, .07); }
+.atomic-status-card > .spinner, .atomic-status-icon { flex: 0 0 auto; margin-top: 3px; }
+.atomic-status-icon { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 50%; color: #875e08; background: #fff1c7; font-weight: 750; }
+.authoring-view.prose-entry .conversation { grid-template-rows: auto auto auto minmax(0,1fr); }
+.authoring-view.prose-entry .composer-shell { grid-row: 3; padding-top: 30px; }
+.authoring-view.prose-entry .thread { grid-row: 4; padding: 0; }
+.atomic-logic-summary { width: min(920px, 100%); margin: 0 auto; display: grid; gap: 18px; padding: 8px 0 32px; }
+.atomic-logic-section { padding: 24px 27px; border: 1px solid var(--line); border-radius: 16px; background: white; }
+.atomic-summary-label { display: block; margin-bottom: 13px; color: var(--blue); font-size: 11px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.atomic-prose-block { margin: 0; color: var(--ink); font-size: 15px; line-height: 1.7; white-space: pre-wrap; }
+.atomic-clarification-list { display: grid; gap: 12px; }
+.atomic-clarification { padding: 16px 18px; border-radius: 12px; background: #f7f9fc; }
+.atomic-clarification-question { margin: 0 0 11px; color: var(--ink); font-size: 14px; line-height: 1.5; }
+.atomic-clarification-answer { padding-left: 13px; border-left: 3px solid var(--blue); }
+.atomic-clarification-answer span { display: block; margin-bottom: 3px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+.atomic-clarification-answer p, .atomic-no-clarifications { margin: 0; color: #394960; font-size: 14px; line-height: 1.5; }
+.atomic-no-clarifications { color: var(--muted); }
+.atomic-review #review-tabs, .atomic-review #review-conversation-panel { display: none !important; }
+.atomic-review .review-surface { grid-template-rows: auto minmax(0,1fr); }
+.implementation-details { max-width: 980px; margin: 18px auto 0; padding: 14px 17px; border: 1px solid var(--line); border-radius: 12px; background: white; }
+.implementation-details summary { cursor: pointer; color: #53627a; font-size: 12px; font-weight: 650; }
+.implementation-details p { margin: 12px 0 8px; color: var(--muted); font-size: 12px; }
+.implementation-details ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.implementation-details li { display: flex; align-items: center; justify-content: space-between; gap: 16px; font-size: 12px; }
+.implementation-details li span { color: var(--muted); }
 .choice-cards { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; }
 .choice-card { min-width: 0; min-height: 45px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); text-align: left; background: #fafbfd; overflow-wrap: anywhere; word-break: break-word; }
 .choice-card[aria-pressed="true"] { border-color: var(--blue); background: var(--blue-soft); }
@@ -295,6 +342,7 @@ legend { margin-bottom: 8px; font-size: 13px; font-weight: 750; }
 .graph-render-error strong { color: var(--red); }
 .mermaid-svg { display: block; width: 65%; min-width: 0; height: auto; margin: 0 auto; padding: 0; }
 .archive-body { min-height: 0; overflow: hidden; padding: 24px; background: #f8fafc; }
+.archive-body.atomic-summary-body { overflow-y: auto; overflow-x: hidden; }
 .archive-layout { height: 100%; display: grid; grid-template-columns: minmax(480px,1fr) minmax(300px,420px); overflow: hidden; border: 1px solid var(--line); border-radius: 18px; background: white; }
 .archive-segments { order: 2; overflow: auto; padding: 22px; border-left: 1px solid var(--line); background: #f7f9fc; }
 .archive-segments h2 { margin: 0 0 5px; font-size: 18px; }

@@ -340,7 +340,11 @@ def _validate_graph_lineage(graph: NormalizedGraph) -> tuple[dict[str, Normalize
             _fail("UNSUPPORTED_CAPABILITY", node.capability)
         if node.capability == "retry_policy" and not node.generated_policy:
             _fail("AUTHORED_POLICY_NODE", node.id)
-        if node.generated_policy and node.capability not in {"retry_policy", "end"}:
+        if node.generated_policy and node.capability not in {
+            "retry_policy",
+            "send_text_message",
+            "end",
+        }:
             _fail("GENERATED_NODE_INVALID", node.id)
         _sorted_source_refs(node, source_units)
         _generated_rule(node)
@@ -668,7 +672,7 @@ def _validate_outgoing_route_shapes(
 
     for node in sorted(nodes.values(), key=_node_sort_key):
         if node.capability == "send_text_message":
-            expected = {"next": (1, 1, False)}
+            expected = {"next": (1, 1, node.generated_policy)}
         elif node.capability == "capture_user_input":
             expected = {
                 "next": (1, 1, False),
@@ -726,7 +730,32 @@ def _validate_routes(
     folded_retry: list[dict[str, Any]] = []
     for node in sorted(nodes.values(), key=_node_sort_key):
         if node.capability == "send_text_message":
-            _one_edge(outgoing, node.id, "next", generated=False)
+            next_edge = _one_edge(
+                outgoing,
+                node.id,
+                "next",
+                generated=node.generated_policy,
+            )
+            if node.generated_policy:
+                rule = _generated_rule(node)
+                if rule not in {
+                    "input-retry-exhausted-terminal",
+                    "choice-retry-exhausted-terminal",
+                }:
+                    _fail("GENERATED_MESSAGE_RULE_INVALID", node.id)
+                if (
+                    node.config.get("copy") != POLICY.retry_exhausted_message
+                    or node.config.get("locale") != "en"
+                ):
+                    _fail("RETRY_EXHAUSTED_MESSAGE_MISMATCH", node.id)
+                target = nodes.get(next_edge.target_id)
+                if (
+                    target is None
+                    or target.capability != "end"
+                    or not target.generated_policy
+                    or _generated_rule(target) != rule
+                ):
+                    _fail("RETRY_EXHAUSTED_TERMINAL_MISSING", node.id)
         elif node.capability == "capture_user_input":
             next_edge = _one_edge(outgoing, node.id, "next", generated=False)
             exhausted = _one_edge(outgoing, node.id, "exhausted", generated=True)
@@ -753,6 +782,8 @@ def _validate_routes(
                 target = nodes.get(target_id)
                 if target is None or not target.generated_policy or _generated_rule(target) != rule:
                     _fail("POLICY_TARGET_MISMATCH", node.id)
+            if nodes[exhausted.target_id].capability != "send_text_message":
+                _fail("RETRY_EXHAUSTED_MESSAGE_MISSING", node.id)
         elif node.capability == "fixed_choice":
             outcomes, default, invalid, timeout = _choice_edges(outgoing, node)
             retry_node = nodes.get(default.target_id)
@@ -782,6 +813,7 @@ def _validate_routes(
                 or exhausted_target is None
                 or not exhausted_target.generated_policy
                 or _generated_rule(exhausted_target) != "choice-retry-exhausted-terminal"
+                or exhausted_target.capability != "send_text_message"
             ):
                 _fail("POLICY_TARGET_MISMATCH", node.id)
             folded_retry.append(
@@ -973,7 +1005,12 @@ def build_flow_spec(graph: NormalizedGraph):
             "generated_from_decision_ids": [],
         }
         if node.capability == "send_text_message":
-            next_node = _one_edge(outgoing, source_id, "next", generated=False).target_id
+            next_node = _one_edge(
+                outgoing,
+                source_id,
+                "next",
+                generated=node.generated_policy,
+            ).target_id
             flow_nodes.append(
                 {
                     **common,

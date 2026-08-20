@@ -25,7 +25,7 @@ from product4.workbench.auth import (
 from product4.workbench.glific_client import GlificClientError, _normalize_base_url
 
 
-FIXED_MODEL = "gpt-5.6-sol"
+FIXED_MODEL = "gpt-5.4"
 ENCRYPTION_KEY_ENV = "PRODUCT4_CREDENTIAL_ENCRYPTION_KEY"
 BOOTSTRAP_OPENAI_ENV = "PRODUCT4_BOOTSTRAP_OPENAI_API_KEY"
 BOOTSTRAP_OPENAI_PROJECT_ID_ENV = "PRODUCT4_BOOTSTRAP_OPENAI_PROJECT_ID"

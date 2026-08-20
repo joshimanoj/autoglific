@@ -33,7 +33,7 @@ key plus an optional OpenAI project ID, then a masked review/save step. Each use
 
 - their OpenAI API key, used only server-side for authoring;
 - an optional OpenAI project ID, used only to select the project for that key;
-- the fixed authoring model `gpt-5.6-sol` (there is no model selector);
+- the fixed authoring model `gpt-5.4` with high reasoning (there is no model selector);
 - their Glific HTTPS tenant URL, mobile number, and password.
 
 Glific fields may be edited later and are required before publishing.

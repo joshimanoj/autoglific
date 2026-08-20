@@ -337,7 +337,7 @@ def _validate_coverage_and_sources(package: Any) -> tuple[dict[str, Any], dict[s
         ):
             _reject("P4_E1_REQUIREMENT_PAYLOAD_MISMATCH")
         if generated_rule is not None:
-            if node_payload["type"] not in {"end", "retry_policy"}:
+            if node_payload["type"] not in {"send_message", "end", "retry_policy"}:
                 _reject("P4_E1_GENERATED_NODE_TYPE_INVALID")
             if not _policy_provenance(requirement.provenance, rule=generated_rule):
                 _reject("P4_E1_GENERATED_NODE_PROVENANCE_MISMATCH")
@@ -575,7 +575,12 @@ def _validate_authored_tree(
     return root
 
 
-def _validate_policy_edge(edge: Any, source_type: str, role: str) -> None:
+def _validate_policy_edge(
+    edge: Any,
+    source_type: str,
+    role: str,
+    source_rule: str | None = None,
+) -> None:
     expected_rules = {
         ("capture_input", "exhausted"): "input-retry-exhausted-terminal",
         ("capture_input", "timeout"): "input-no-response-terminal",
@@ -584,6 +589,7 @@ def _validate_policy_edge(edge: Any, source_type: str, role: str) -> None:
         ("fixed_choice", "timeout"): "choice-no-response-terminal",
         ("retry_policy", "retry"): "bounded-invalid-response-retry",
         ("retry_policy", "exhausted"): "bounded-invalid-response-retry",
+        ("send_message", "next"): source_rule,
         ("persist_contact_field", "failure"): "persistence-failure-terminal",
     }
     expected = expected_rules.get((source_type, role))
@@ -617,7 +623,13 @@ def _validate_expanded_policy_topology(
         if policy_edge != touches_generated:
             _reject("P4_E1_EDGE_GENERATED_MARKING_MISMATCH")
         if policy_edge:
-            _validate_policy_edge(edge, nodes[edge.source_id].type, edge.role)
+            source_payload = nodes[edge.source_id].model_dump(mode="json")
+            _validate_policy_edge(
+                edge,
+                nodes[edge.source_id].type,
+                edge.role,
+                _generated_rule(source_payload),
+            )
 
     for node_id in generated_ids:
         node_payload = nodes[node_id].model_dump(mode="json")
@@ -641,6 +653,23 @@ def _validate_expanded_policy_topology(
                 exhausted_edges[0].target_id,
                 "choice-retry-exhausted-terminal",
             )
+        elif node_type == "send_message":
+            if rule not in {
+                "input-retry-exhausted-terminal",
+                "choice-retry-exhausted-terminal",
+            }:
+                _reject("P4_E1_GENERATED_MESSAGE_RULE_INVALID")
+            if (
+                node_payload["copy"] != POLICY.retry_exhausted_message
+                or node_payload["locale"] != "en"
+            ):
+                _reject("P4_E1_RETRY_EXHAUSTED_MESSAGE_MISMATCH")
+            next_edges = _require_exact_edges(outgoing, node_id, "next", count=1)
+            if next_edges[0].target_id != node_payload["next_node_id"]:
+                _reject("P4_E1_RETRY_EXHAUSTED_MESSAGE_ROUTE_MISMATCH")
+            if nodes[next_edges[0].target_id].type != "end":
+                _reject("P4_E1_RETRY_EXHAUSTED_TERMINAL_MISSING")
+            _require_generated_target_rule(nodes, next_edges[0].target_id, rule)
         elif node_type == "end":
             if outgoing[node_id]:
                 _reject("P4_E1_GENERATED_END_HAS_OUTGOING")
@@ -672,7 +701,7 @@ def _validate_expanded_policy_topology(
             timeout = _require_exact_edges(outgoing, node.id, "timeout", count=1)[0]
             if exhausted.target_id != retry["on_exhausted_node_id"] or timeout.target_id != no_response["next_node_id"]:
                 _reject("P4_E1_INPUT_POLICY_ROUTE_MISMATCH")
-            if nodes[exhausted.target_id].type != "end" or nodes[timeout.target_id].type != "end":
+            if nodes[exhausted.target_id].type != "send_message" or nodes[timeout.target_id].type != "end":
                 _reject("P4_E1_INPUT_POLICY_TERMINAL_MISSING")
             _require_generated_target_rule(
                 nodes,
@@ -814,7 +843,7 @@ def ingest_frozen_package(package_value: dict[str, Any], declared_hash: str) -> 
         generated_rule = _generated_rule(payload)
         if generated_rule is not None:
             generated_ids.add(node_id)
-            if payload["type"] not in {"end", "retry_policy"}:
+            if payload["type"] not in {"send_message", "end", "retry_policy"}:
                 _reject("P4_E1_GENERATED_NODE_TYPE_INVALID")
         elif payload["type"] == "retry_policy":
             _reject("P4_E1_RETRY_POLICY_MUST_BE_GENERATED")

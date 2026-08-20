@@ -783,6 +783,11 @@
       workspaceMode = "publishing";
       processPanel = requestedPanel || processPanel || "publishing";
     }
+    if (payload?.session?.atomic_workbench?.status === "projected" && payload?.session?.state === "ready_for_review" && workspaceMode === "authoring") {
+      workspaceMode = "review";
+      reviewPanel = "mermaid";
+      invalidateMermaidRender();
+    }
     if (requestedPanel) processPanel = requestedPanel;
     if (flowLoading) finishFlowLoading();
     if (payload?.session?.state !== "frozen") generating = false;
@@ -988,12 +993,52 @@
     if (!entries.length) return "<div class=\"empty-state\"><strong>Your flow statements will appear here</strong></div>";
     return entries.map((entry, index) => "<article class=\"segment" + (entry.current ? " current" : "") + "\"><span class=\"segment-number\">" + (index + 1) + "</span><div><p>" + esc(entry.text) + "</p>" + (entry.current ? "<span class=\"segment-state\">" + esc(entry.status) + "</span>" : "") + "</div></article>").join("");
   }
-  function renderSegments() { $("segment-list").innerHTML = segmentsHtml(); }
+  function renderSegments() { if ($("segment-list")) $("segment-list").innerHTML = segmentsHtml(); }
+
+  function atomicProgressHtml() {
+    if (!state || isSharedFlow()) return "";
+    const atomic = state.session.atomic_workbench;
+    const active = atomic?.status === "awaiting_configuration" ? 2 : atomic?.status === "projected" ? 3 : 1;
+    const labels = ["Understand flow", "Complete details", "Review flow"];
+    return labels.map((label, index) => {
+      const step = index + 1;
+      const status = active > step ? "done" : active === step ? "active" : "pending";
+      return "<div class=\"atomic-progress-step " + status + "\"><span>" + (status === "done" ? "✓" : step) + "</span><strong>" + label + "</strong></div>";
+    }).join("<div class=\"atomic-progress-line\"></div>");
+  }
+
+  function renderAtomicProgress() {
+    const progress = $("atomic-progress");
+    if (!progress) return;
+    progress.innerHTML = atomicProgressHtml();
+    progress.classList.toggle("hidden", !progress.innerHTML);
+  }
+
+  function atomicLogicSummaryHtml() {
+    const atomic = state?.session?.atomic_workbench;
+    if (!atomic) return "";
+    const prose = String(atomic.prose || "").trim();
+    const questions = Array.isArray(atomic.questions) ? atomic.questions : [];
+    const answers = atomic.answers && typeof atomic.answers === "object" ? atomic.answers : {};
+    const clarifications = questions.map((item) => {
+      const answer = answers[item.gap_id];
+      return "<article class=\"atomic-clarification\"><p class=\"atomic-clarification-question\">" + esc(item.question || "Clarification") + "</p><div class=\"atomic-clarification-answer\"><span>Confirmed answer</span><p>" + esc(formatValue(answer) || "Not answered") + "</p></div></article>";
+    }).join("");
+    const clarificationContent = clarifications || "<p class=\"atomic-no-clarifications\">No clarifications were needed.</p>";
+    return "<div class=\"atomic-logic-summary\"><section class=\"atomic-logic-section\"><span class=\"atomic-summary-label\">Original flow description</span><p class=\"atomic-prose-block\">" + esc(prose || "No original description is available.") + "</p></section><section class=\"atomic-logic-section\"><span class=\"atomic-summary-label\">Clarifications</span><div class=\"atomic-clarification-list\">" + clarificationContent + "</div></section></div>";
+  }
 
   function conversationHtml() {
     if (flowLoading) return flowLoadingHtml();
-    if (!state) return chatMessage("assistant", "I’ll help you build one segment at a time, ask for missing details, show the complete journey for review, and publish only after you approve it.", "AutoGlific");
+    if (!state) return "<section class=\"atomic-empty\"><span class=\"atomic-empty-mark\">✦</span><h2>Describe one complete flow</h2><p>Include what starts it, what people see, the questions and choices, every branch, and how each path ends.</p></section>";
     const session = state.session;
+    const atomic = session.atomic_workbench;
+    if (!isSharedFlow() && (atomic || (!session.nodes.length && session.state === "editing"))) {
+      if (busy && !atomic) return "<section class=\"atomic-status-card working\"><span class=\"spinner\"></span><div><h2>Understanding your flow</h2><p>Decomposing the prose, connecting its paths and matching each behavior to an available capability.</p></div></section>";
+      if (atomic?.status === "awaiting_configuration") return "<section class=\"atomic-status-card\"><span class=\"atomic-status-icon\">?</span><div><h2>A few details are needed</h2><p>The flow logic is understood. Complete the questions below so the graph can be generated.</p></div></section>";
+      if (atomic?.status === "projected") return atomicLogicSummaryHtml();
+      return "";
+    }
     const turns = conversationTurns();
     const messages = [];
     turns.forEach((turn) => {
@@ -1012,7 +1057,7 @@
     }
     if (session.state === "ready_for_review" || session.state === "frozen") messages.push(chatMessage("assistant completion", "Flow complete. Review the flow before generating or publishing anything by clicking the Review flow button at the top.", "AutoGlific"));
     if (session.state === "blocked") messages.push(chatMessage("assistant question", esc(session.blocked_error?.message || "This flow needs attention before it can continue."), "AutoGlific"));
-    if (busy && workspaceMode === "authoring") messages.push(chatMessage("assistant working", "<span class=\"working\"><span class=\"spinner\"></span>Working on this segment…</span>", "AutoGlific"));
+    if (busy && workspaceMode === "authoring") messages.push(chatMessage("assistant working", "<span class=\"working\"><span class=\"spinner\"></span>Analyzing the complete flow…</span>", "AutoGlific"));
     return messages.join("");
   }
   function renderConversation() {
@@ -1082,6 +1127,28 @@
     })();
   }
   function renderQuestion() {
+    const atomic = state?.session?.atomic_workbench;
+    const atomicWaiting = Boolean(
+      atomic?.status === "awaiting_configuration"
+      && Array.isArray(atomic.questions)
+      && atomic.questions.length
+      && workspaceMode === "authoring"
+    );
+    if (atomicWaiting) {
+      $("answer-form").classList.remove("hidden");
+      $("question-prompt").innerHTML = "<strong>Complete these details</strong><p>Each answer will be used exactly as entered.</p>";
+      const key = "atomic:" + state.session.revision + ":" + atomic.questions.map((item) => item.gap_id).join(":");
+      if (renderedQuestionKey !== key) {
+        $("answer-control").innerHTML = "<div class=\"atomic-question-batch\">" + atomic.questions.map((item, index) => (
+          "<label class=\"atomic-question\" for=\"atomic-answer-" + index + "\"><span>" + esc(item.question) + "</span><textarea id=\"atomic-answer-" + index + "\" data-atomic-gap-id=\"" + esc(item.gap_id) + "\" rows=\"3\" placeholder=\"Enter the exact wording…\"></textarea></label>"
+        )).join("") + "</div>";
+        renderedQuestionKey = key;
+      }
+      $("answer-submit").disabled = busy;
+      $("answer-form").setAttribute("aria-busy", String(busy));
+      $("answer-control").querySelectorAll("textarea").forEach((control) => { control.disabled = busy; });
+      return;
+    }
     const question = state?.current_question;
     const waiting = Boolean(question && state?.session?.state === "waiting_for_answer" && workspaceMode === "authoring");
     if (waiting && isValidationQuestion(question)) {
@@ -1140,18 +1207,21 @@
       $("locked-composer").classList.add("hidden");
       return;
     }
-    const instructionVisible = Boolean(state && workspaceMode === "authoring" && state.session.state === "editing");
+    const atomicWaiting = state?.session?.atomic_workbench?.status === "awaiting_configuration";
+    const instructionVisible = Boolean(state && workspaceMode === "authoring" && state.session.state === "editing" && !state.session.atomic_workbench);
     const lockedVisible = Boolean(state && workspaceMode === "authoring" && ["ready_for_review", "frozen"].includes(state.session.state));
     const blockedVisible = Boolean(state && workspaceMode === "authoring" && state.session.state === "blocked");
+    $("authoring-view").classList.toggle("prose-entry", instructionVisible);
     $("instruction-form").classList.toggle("hidden", !instructionVisible);
     $("instruction").disabled = !instructionVisible || busy;
-    $("instruction").placeholder = "What should happen first?";
+    $("instruction").placeholder = "Describe the complete flow in plain language…";
     $("send-instruction").disabled = !instructionVisible || busy;
-    $("composer-hint").textContent = !state ? "Create a named flow to begin" : state.session.state === "waiting_for_answer" ? "Your answer is used exactly as entered" : blockedVisible ? "Flow needs attention" : lockedVisible ? "Review is required before the next action" : "Please share your flow one branch/step at a time.";
+    $("composer-hint").textContent = !state ? "Create a named flow to begin" : atomicWaiting ? "Answer every clarification together" : state.session.state === "waiting_for_answer" ? "Your answer is used exactly as entered" : blockedVisible ? "Flow needs attention" : lockedVisible ? "Review is required before the next action" : "Include the trigger, messages, questions, choices, branches and endings.";
     $("locked-composer").classList.toggle("hidden", !(lockedVisible || blockedVisible));
     if (lockedVisible) $("locked-composer").innerHTML = statusIcon("lock") + "<span>Flow complete — ready for review</span>";
     else if (blockedVisible) $("locked-composer").innerHTML = statusIcon("warning") + "<span>Flow needs attention. Review the message above, then choose this flow again or start a new one.</span>";
     renderQuestion();
+    if ($("flow-stage-copy")) $("flow-stage-copy").textContent = atomicWaiting ? "Answer the required details in one batch." : "Describe the complete experience in plain language.";
   }
 
   function presentationMermaidSource() { return state?.live_presentation_mermaid || state?.checkpoint?.presentation_mermaid || ""; }
@@ -1242,15 +1312,24 @@
     if (workspaceMode !== "review" || !state) return;
     $("review-title").textContent = "Review " + state.session.title;
     const trigger = currentTrigger();
+    const atomic = state.session.atomic_workbench;
+    const atomicSteps = atomic?.meaning_plan?.steps;
     const nodes = state.session.nodes || [];
     const edges = state.session.edges || [];
-    $("graph-meta").textContent = (trigger ? "Trigger: " + trigger + " · " : "") + nodes.length + " authored step" + (nodes.length === 1 ? "" : "s") + " · " + edges.length + " connection" + (edges.length === 1 ? "" : "s");
-    $("modify-flow").classList.toggle("hidden", isSharedFlow());
+    const visibleStepCount = Array.isArray(atomicSteps) ? atomicSteps.length : nodes.length;
+    $("graph-meta").textContent = (trigger ? "Trigger: " + trigger + " · " : "") + visibleStepCount + " flow step" + (visibleStepCount === 1 ? "" : "s");
+    $("review-view").classList.toggle("atomic-review", Boolean(atomic));
+    $("modify-flow").classList.toggle("hidden", isSharedFlow() || Boolean(atomic));
     $("confirm-flow").classList.toggle("hidden", isSharedFlow());
     $("modify-flow").disabled = busy || isSharedFlow();
     $("confirm-flow").disabled = busy || !isReviewReady() || isSharedFlow();
+    if (atomic) reviewPanel = "mermaid";
     renderTabState("review-tabs", reviewPanel, "reviewPanel");
+    $("review-conversation-body").classList.toggle("atomic-summary-body", Boolean(atomic));
     $("review-conversation-body").innerHTML = archiveConversationHtml();
+    const generated = Object.entries(atomic?.compilation?.configs || {}).flatMap(([nodeId, values]) => values?.save_as ? [[nodeId, values.save_as]] : []);
+    $("implementation-details").classList.toggle("hidden", !atomic);
+    $("implementation-details-body").innerHTML = generated.length ? "<p>Generated answer names</p><ul>" + generated.map(([nodeId, value]) => "<li><code>" + esc(value) + "</code><span>" + esc(nodeId) + "</span></li>").join("") + "</ul>" : "<p>No generated answer names in this flow.</p>";
     if (reviewPanel === "mermaid") window.setTimeout(() => renderAuthoredMermaid(presentationMermaidSource(), "review-graph"), 0);
   }
 
@@ -1402,17 +1481,26 @@
     buttons[next].focus();
     buttons[next].click();
   }
-  function archiveConversationHtml() { return "<div class=\"archive-layout\"><section class=\"archive-thread\">" + conversationHtml() + "</section><aside class=\"archive-segments\"><h2>Flow Logic</h2><div class=\"segment-list\">" + segmentsHtml() + "</div></aside></div>"; }
+  function archiveConversationHtml() {
+    if (state?.session?.atomic_workbench) return atomicLogicSummaryHtml();
+    return "<div class=\"archive-layout\"><section class=\"archive-thread\">" + conversationHtml() + "</section><aside class=\"archive-segments\"><h2>Flow Logic</h2><div class=\"segment-list\">" + segmentsHtml() + "</div></aside></div>";
+  }
   function renderProcessPanel() {
     if (workspaceMode !== "publishing") return;
     $("process-view").dataset.openPanel = processPanel;
     renderTabState("process-tabs", processPanel, "panel");
-    if (processPanel === "conversation") $("process-conversation-body").innerHTML = archiveConversationHtml();
+    if (processPanel === "conversation") {
+      $("process-conversation-body").classList.toggle(
+        "atomic-summary-body",
+        Boolean(state?.session?.atomic_workbench),
+      );
+      $("process-conversation-body").innerHTML = archiveConversationHtml();
+    }
     else if (!state) return;
     else if (processPanel === "mermaid") { renderedPresentationSource = ""; window.setTimeout(() => renderAuthoredMermaid(presentationMermaidSource(), "process-mermaid-graph"), 0); }
   }
   function render() {
-    renderAlerts(); renderLibrary(); renderShell(); renderDeleteDialog(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing();
+    renderAlerts(); renderLibrary(); renderShell(); renderDeleteDialog(); renderAtomicProgress(); renderConversation(); renderSegments(); renderComposer(); renderReview(); renderProcessPanel(); renderPublishing();
     if (!threadRevealPending) return;
     threadRevealPending = false;
     const revealKey = clarificationRevealKey;
@@ -1743,6 +1831,21 @@
   async function submitInstruction(event) { event.preventDefault(); await submitInstructionText($("instruction").value); }
   async function submitAnswer(event) {
     event.preventDefault();
+    const atomic = state?.session?.atomic_workbench;
+    if (atomic?.status === "awaiting_configuration") {
+      if (busy) return;
+      const controls = Array.from(document.querySelectorAll("[data-atomic-gap-id]"));
+      const answers = {};
+      for (const control of controls) {
+        const value = control.value.trim();
+        if (!value) { const error = new Error("Answer every clarification before continuing."); error.code = "P4_ATOMIC_ANSWER_BATCH_INCOMPLETE"; fail(error); control.focus(); return; }
+        answers[control.dataset.atomicGapId] = value;
+      }
+      setBusy(true);
+      try { const payload = await request("/api/sessions/" + encodeURIComponent(state.session.id) + "/answer", { method: "POST", body: JSON.stringify({ revision: revision(), answers }) }); renderedQuestionKey = ""; busy = false; apply(payload, true); void loadSessions(); }
+      catch (error) { fail(error); }
+      return;
+    }
     const question = state?.current_question;
     if (!question || busy) return;
     let value;
@@ -1925,7 +2028,7 @@
     const projectId = settings.openai_project_id || "Not configured";
     const mobile = settings.mobile_number || {};
     const password = settings.password || {};
-    $("settings-details").innerHTML = "<dt>OpenAI API key</dt><dd>" + esc(openai.masked || "Not configured") + "</dd><dt>OpenAI project ID</dt><dd>" + esc(projectId) + "</dd><dt>Glific URL</dt><dd>" + esc(settings.glific_url || "Not configured") + "</dd><dt>Mobile number</dt><dd>" + esc(mobile.masked || "Not configured") + "</dd><dt>Glific password</dt><dd>" + esc(password.masked || "Not configured") + "</dd><dt>Runtime model</dt><dd>" + esc(settings.model || "gpt-5.6-sol") + "</dd>";
+    $("settings-details").innerHTML = "<dt>OpenAI API key</dt><dd>" + esc(openai.masked || "Not configured") + "</dd><dt>OpenAI project ID</dt><dd>" + esc(projectId) + "</dd><dt>Glific URL</dt><dd>" + esc(settings.glific_url || "Not configured") + "</dd><dt>Mobile number</dt><dd>" + esc(mobile.masked || "Not configured") + "</dd><dt>Glific password</dt><dd>" + esc(password.masked || "Not configured") + "</dd><dt>Runtime model</dt><dd>" + esc(settings.model || "gpt-5.4") + "</dd>";
   }
 
   function validateWizardStep() {
@@ -2017,7 +2120,7 @@
       const openai = settings.openai_api_key || {};
       if ($("openai-project-id")) $("openai-project-id").value = settings.openai_project_id || "";
       const glific = settings.glific_configured ? "configured" : "not configured";
-      if ($("settings-status")) $("settings-status").textContent = "OpenAI API key: " + (openai.configured ? "configured (masked)" : "not configured") + " · Project ID: " + (settings.openai_project_id ? "configured" : "not configured") + " · Glific: " + glific + " · Runtime model: " + String(settings.model || "gpt-5.6-sol");
+      if ($("settings-status")) $("settings-status").textContent = "OpenAI API key: " + (openai.configured ? "configured (masked)" : "not configured") + " · Project ID: " + (settings.openai_project_id ? "configured" : "not configured") + " · Glific: " + glific + " · Runtime model: " + String(settings.model || "gpt-5.4");
       renderSettingsReview();
       renderWizardStep();
       return;

@@ -110,35 +110,32 @@
         <section id="authoring-view" class="authoring-view">
           <section class="conversation" aria-label="Flow conversation">
             <header class="conversation-header">
-              <div><h1 id="flow-title">Opening flow…</h1></div>
+              <div><span class="workspace-eyebrow">Flow builder</span><h1 id="flow-title">Opening flow…</h1><p id="flow-stage-copy">Describe the complete experience in plain language.</p></div>
               <div class="header-actions"><button id="save-flow" class="button secondary" type="button" disabled>Save flow</button><button id="review-flow" class="button primary" type="button" disabled>Review flow</button></div>
             </header>
+            <div id="atomic-progress" class="atomic-progress" aria-label="Flow creation progress"></div>
             <div id="thread" class="thread" aria-live="polite"></div>
             <div id="composer-shell" class="composer-shell">
               <form id="instruction-form" class="composer">
-                <textarea id="instruction" rows="3" placeholder="What should happen first?" aria-label="Message AutoGlific" aria-describedby="composer-hint"></textarea>
-                <div class="composer-footer"><span id="composer-hint">Please share your flow one branch/step at a time.</span><button id="send-instruction" class="button primary" type="submit">Send</button></div>
+                <div class="prose-editor-heading"><h2>Describe the flow</h2><p>Write the complete journey in your own words.</p></div>
+                <textarea id="instruction" rows="7" placeholder="Describe the complete flow in plain language…" aria-label="Describe the complete flow" aria-describedby="composer-hint"></textarea>
+                <div class="composer-footer"><span id="composer-hint">Include the trigger, messages, questions, choices, branches and endings.</span><button id="send-instruction" class="button primary" type="submit">Build flow</button></div>
               </form>
               <form id="answer-form" class="answer-composer hidden"><div id="question-prompt" class="question-prompt"></div><div id="answer-control"></div><div class="composer-footer answer-footer"><button id="answer-submit" class="button primary" type="submit">Continue</button></div></form>
               <div id="locked-composer" class="locked-composer hidden"><svg class="status-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="10" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3"></path></svg><span>Flow complete — ready for review</span></div>
             </div>
           </section>
-
-          <aside class="segments" aria-label="User segments">
-            <header><h2>Your segments</h2><p>The latest segment is highlighted</p></header>
-            <div id="segment-list" class="segment-list"></div>
-          </aside>
         </section>
 
         <section id="review-view" class="stage-view review-view hidden" aria-label="Review flow">
           <section class="review-surface">
-            <header class="stage-header"><div><h1 id="review-title">Review flow</h1><p>Check the complete journey before anything is generated or published</p></div><div class="header-actions"><button id="modify-flow" class="button secondary" type="button">Modify</button><button id="confirm-flow" class="button primary" type="button">Confirm flow</button></div></header>
+            <header class="stage-header"><div><span class="workspace-eyebrow">Flow review</span><h1 id="review-title">Review flow</h1><p>Your complete flow is ready. Check the paths before confirming it.</p></div><div class="header-actions"><button id="modify-flow" class="button secondary" type="button">Modify</button><button id="confirm-flow" class="button primary" type="button">Confirm flow</button></div></header>
             <nav id="review-tabs" class="panel-tabs" role="tablist" aria-label="Review panels">
               <button id="review-tab-conversation" class="panel-tab" type="button" role="tab" aria-selected="false" aria-controls="review-conversation-panel" tabindex="-1" data-review-panel="conversation">Logic</button>
               <button id="review-tab-mermaid" class="panel-tab" type="button" role="tab" aria-selected="true" aria-controls="review-mermaid-panel" tabindex="0" data-review-panel="mermaid">Flowchart</button>
             </nav>
             <section id="review-conversation-panel" class="tab-panel hidden" role="tabpanel" aria-labelledby="review-tab-conversation"><h1 class="sr-only">Logic</h1><div id="review-conversation-body" class="archive-body"></div></section>
-            <section id="review-mermaid-panel" class="tab-panel" role="tabpanel" aria-labelledby="review-tab-mermaid"><h1 class="sr-only">Flowchart</h1><div class="graph-area"><div id="graph-meta" class="graph-meta"></div><div id="review-graph" class="mermaid-canvas" role="img" aria-label="Connected flow graph"></div></div></section>
+            <section id="review-mermaid-panel" class="tab-panel" role="tabpanel" aria-labelledby="review-tab-mermaid"><h1 class="sr-only">Flowchart</h1><div class="graph-area"><div id="graph-meta" class="graph-meta"></div><div id="review-graph" class="mermaid-canvas" role="img" aria-label="Connected flow graph"></div><details id="implementation-details" class="implementation-details"><summary>Implementation details</summary><div id="implementation-details-body"></div></details></div></section>
           </section>
         </section>
 

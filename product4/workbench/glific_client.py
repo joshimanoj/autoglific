@@ -11,12 +11,15 @@ import copy
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlsplit
+
+import certifi
 
 
 class GlificClientError(RuntimeError):
@@ -239,7 +242,11 @@ class GlificClient:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
         request = urllib.request.Request(url, data=body, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.config.timeout_seconds,
+                context=ssl.create_default_context(cafile=certifi.where()),
+            ) as response:
                 raw = response.read()
                 return response.status, json.loads(raw.decode("utf-8")) if raw else {}
         except urllib.error.HTTPError as exc:

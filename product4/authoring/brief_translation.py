@@ -1444,7 +1444,7 @@ class BriefSemanticTranslator:
 
 WORKBENCH_SEMANTIC_PROMPT_VERSION = "product4-workbench-incremental-semantic-planning-1.2"
 DEFAULT_OPENAI_CHAT_COMPLETIONS_ENDPOINT = "https://api.openai.com/v1/chat/completions"
-DEFAULT_WORKBENCH_SEMANTIC_MODEL = "gpt-5.6-sol"
+DEFAULT_WORKBENCH_SEMANTIC_MODEL = "gpt-5.4"
 
 
 class IncrementalSemanticModelClient:

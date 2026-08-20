@@ -25,6 +25,7 @@ class TechnicalPolicy(BaseModel):
     version: str
     retry: RetryPolicy
     no_response_timeout_seconds: int = Field(gt=0)
+    retry_exhausted_message: str
     retry_exhausted_reason: str
     no_response_reason: str
     persistence_failure_reason: str
@@ -38,6 +39,10 @@ POLICY = TechnicalPolicy(
         invalid_message="Please provide a valid response.",
     ),
     no_response_timeout_seconds=86_400,
+    retry_exhausted_message=(
+        "We couldn’t validate your response after several attempts. "
+        "Please restart the flow and try again."
+    ),
     retry_exhausted_reason="Technical policy: valid response attempts exhausted.",
     no_response_reason="Technical policy: no response before timeout.",
     persistence_failure_reason="Technical policy: contact-field persistence failed.",

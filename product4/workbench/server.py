@@ -12,7 +12,7 @@ import sys
 import threading
 import uuid
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +32,11 @@ from product4.authoring.brief_translation import (
     safe_validation_fingerprint,
     safe_network_subtype,
 )
+from product4.authoring.atomic_pipeline import (
+    complete_atomic_checkpoint,
+    create_atomic_checkpoint,
+)
+from product4.authoring.atomic_projection import project_meaning_plan
 from product4.authoring.freeze import freeze, prepare_confirmation
 from product4.authoring.interpreter import RegistryInterpreter
 from product4.authoring.review import (
@@ -429,6 +434,8 @@ class WorkbenchApp:
         user_store: Any | None = None,
         auth_provider: NativeEmailPasswordProvider | None = None,
         credential_vault: CredentialVault | None = None,
+        atomic_checkpoint_factory: Callable[..., tuple[dict[str, Any], Any]] = create_atomic_checkpoint,
+        atomic_checkpoint_completer: Callable[..., tuple[dict[str, Any], Any]] = complete_atomic_checkpoint,
     ) -> None:
         self.test_mode = offline
         self.hosted = os.environ.get("VERCEL", "").strip() == "1"
@@ -509,6 +516,8 @@ class WorkbenchApp:
         self._glific_progress: dict[tuple[str, str], str] = {}
         self._session_tokens: dict[tuple[str, str], int | str] = {}
         self._services: dict[tuple[str, str, str], AuthoringService] = {}
+        self._atomic_checkpoint_factory = atomic_checkpoint_factory
+        self._atomic_checkpoint_completer = atomic_checkpoint_completer
 
     @staticmethod
     def _owner_key(owner_id: str | None) -> str:
@@ -1384,13 +1393,60 @@ class WorkbenchApp:
         with self._lock(session_id, owner_id):
             session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
+            if session.nodes or session.atomic_workbench is not None:
+                raise ApiError(
+                    "P4_ATOMIC_PROSE_ALREADY_SUBMITTED",
+                    "This flow already has a prose plan.",
+                    HTTPStatus.CONFLICT,
+                )
             before = session.revision
             try:
-                updated = self._service_for(owner_id).propose(session, statement.strip())
+                if owner_id is None and not self.test_mode:
+                    raise ApiError(
+                        "P4_SEMANTIC_CREDENTIAL_MISSING",
+                        "Save an OpenAI API key in Settings before authoring a flow.",
+                        HTTPStatus.CONFLICT,
+                    )
+                credentials = self._credential_values(owner_id) if owner_id is not None else {}
+                api_key = credentials.get("openai_api_key", "offline-injected")
+                project = credentials.get("openai_project_id", "")
+                if not api_key and not self.test_mode:
+                    raise ApiError(
+                        "P4_SEMANTIC_CREDENTIAL_MISSING",
+                        "Save an OpenAI API key in Settings before authoring a flow.",
+                        HTTPStatus.CONFLICT,
+                    )
+                checkpoint, plan = self._atomic_checkpoint_factory(
+                    statement.strip(),
+                    api_key=api_key,
+                    project=project,
+                    session_id=session.id,
+                )
+                working = session.model_copy(deep=True)
+                working.original_brief = statement.strip()
+                working.atomic_workbench = checkpoint
+                if plan is None:
+                    updated = AuthoringService._record(
+                        working,
+                        "atomic_awaiting_configuration",
+                        parent=session.revision,
+                    )
+                else:
+                    projection_service = AuthoringService(
+                        RegistryInterpreter(None),
+                        workbench_mode=True,
+                    )
+                    updated = project_meaning_plan(working, plan, projection_service)
+                    completed = dict(checkpoint)
+                    completed["status"] = "projected"
+                    updated.atomic_workbench = completed
+                    updated = AuthoringService._record(
+                        updated,
+                        "atomic_projected",
+                        parent=updated.revision,
+                    )
             except Exception as exc:
                 error = _api_error_from_exception(exc)
-                if error.code == "P4_TRANSLATION_AMBIGUOUS":
-                    error.available_branches = _open_branch_labels(session)
                 raise error from exc
             self._save(updated, before, owner_id)
             return self.view(updated, owner_id)
@@ -1449,6 +1505,38 @@ class WorkbenchApp:
             session = self._load_session(session_id, owner_id)
             self._require_revision(session, body)
             before = session.revision
+            checkpoint = session.atomic_workbench
+            if checkpoint is not None and checkpoint.get("status") == "awaiting_configuration":
+                answers = body.get("answers")
+                if not isinstance(answers, dict):
+                    raise ApiError(
+                        "P4_ATOMIC_ANSWER_BATCH_REQUIRED",
+                        "Submit one answer for every clarification.",
+                    )
+                try:
+                    completed, plan = self._atomic_checkpoint_completer(
+                        checkpoint,
+                        answers,
+                        session_id=session.id,
+                    )
+                    working = session.model_copy(deep=True)
+                    working.atomic_workbench = completed
+                    projection_service = AuthoringService(
+                        RegistryInterpreter(None),
+                        workbench_mode=True,
+                    )
+                    updated = project_meaning_plan(working, plan, projection_service)
+                    completed["status"] = "projected"
+                    updated.atomic_workbench = completed
+                    updated = AuthoringService._record(
+                        updated,
+                        "atomic_projected",
+                        parent=updated.revision,
+                    )
+                except Exception as exc:
+                    raise _api_error_from_exception(exc) from exc
+                self._save(updated, before, owner_id)
+                return self.view(updated, owner_id)
             answer = self._typed_answer(session, body)
             try:
                 updated = self._service_for(owner_id).answer(session, answer)
@@ -2123,12 +2211,16 @@ def build_server(
     semantic_client: Any | None = None,
     offline: bool = False,
     glific_client_factory: Any | None = None,
+    atomic_checkpoint_factory: Callable[..., tuple[dict[str, Any], Any]] = create_atomic_checkpoint,
+    atomic_checkpoint_completer: Callable[..., tuple[dict[str, Any], Any]] = complete_atomic_checkpoint,
 ) -> ThreadingHTTPServer:
     server = ThreadingHTTPServer((host, port), WorkbenchRequestHandler)
     server.workbench_app = WorkbenchApp(  # type: ignore[attr-defined]
         semantic_client=semantic_client,
         offline=offline,
         glific_client_factory=glific_client_factory,
+        atomic_checkpoint_factory=atomic_checkpoint_factory,
+        atomic_checkpoint_completer=atomic_checkpoint_completer,
     )
     return server
 

@@ -159,6 +159,89 @@ class _Expansion:
         self.coverage.append({"source_unit_id": unit_id, "requirement_ids": [requirement_id], "node_ids": [node_id], "edge_ids": []})
         return node_id, requirement_id
 
+    def add_policy_retry_exhaustion(self, rule: str) -> tuple[str, str]:
+        """Generate visible retry-exhaustion copy followed by a terminal."""
+
+        message_node_id = self._generated_node_id()
+        message_requirement_id = self._generated_requirement_id()
+        end_node_id = self._generated_node_id()
+        end_requirement_id = self._generated_requirement_id()
+        message_unit_id, message_quote = self._policy_unit(rule)
+        end_unit_id, end_quote = self._policy_unit(rule)
+        message_source_ref = {
+            "source_unit_id": message_unit_id,
+            "source_quote": message_quote,
+        }
+        end_source_ref = {
+            "source_unit_id": end_unit_id,
+            "source_quote": end_quote,
+        }
+        self.nodes.extend([
+            {
+                "id": message_node_id,
+                "type": "send_message",
+                "label": None,
+                "copy": POLICY.retry_exhausted_message,
+                "locale": "en",
+                "next_node_id": end_node_id,
+                "source_refs": [message_source_ref],
+            },
+            {
+                "id": end_node_id,
+                "type": "end",
+                "label": None,
+                "reason": POLICY.retry_exhausted_reason,
+                "source_refs": [end_source_ref],
+            },
+        ])
+        self.requirements.extend([
+            {
+                "id": message_requirement_id,
+                "capability": "send_text_message",
+                "summary": POLICY.retry_exhausted_message,
+                "status": "proposed",
+                "provenance": [_policy_provenance(rule)],
+                "payload": {
+                    "copy": POLICY.retry_exhausted_message,
+                    "locale": "en",
+                    "next_requirement_id": end_requirement_id,
+                },
+                "decision_ids": [],
+                "depends_on": [],
+                "cross_references": [],
+            },
+            {
+                "id": end_requirement_id,
+                "capability": "end",
+                "summary": POLICY.retry_exhausted_reason,
+                "status": "proposed",
+                "provenance": [_policy_provenance(rule)],
+                "payload": {"reason": POLICY.retry_exhausted_reason},
+                "decision_ids": [],
+                "depends_on": [],
+                "cross_references": [],
+            },
+        ])
+        edge_id = self.add_policy_edge(
+            message_node_id,
+            end_node_id,
+            "next",
+            {"type": "next"},
+            rule,
+        )
+        self.coverage.extend([{
+            "source_unit_id": message_unit_id,
+            "requirement_ids": [message_requirement_id],
+            "node_ids": [message_node_id],
+            "edge_ids": [edge_id],
+        }, {
+            "source_unit_id": end_unit_id,
+            "requirement_ids": [end_requirement_id],
+            "node_ids": [end_node_id],
+            "edge_ids": [],
+        }])
+        return message_node_id, message_requirement_id
+
     def add_policy_retry(
         self,
         *,
@@ -239,7 +322,7 @@ class _Expansion:
                 node_payload = {"id": node.id, "type": "send_message", "label": None, "copy": config["copy"], "locale": config["locale"], "next_node_id": next_id, "source_refs": [source_ref]}
                 requirement_payload = {"copy": config["copy"], "locale": config["locale"], "next_requirement_id": next_req}
             elif node.capability == "capture_user_input":
-                exhausted_node, exhausted_req = self.add_policy_end("input-retry-exhausted-terminal", POLICY.retry_exhausted_reason)
+                exhausted_node, exhausted_req = self.add_policy_retry_exhaustion("input-retry-exhausted-terminal")
                 timeout_node, timeout_req = self.add_policy_end("input-no-response-terminal", POLICY.no_response_reason)
                 retry = {"max_attempts": POLICY.retry.max_attempts, "messages": list(POLICY.retry.messages), "on_exhausted_node_id": exhausted_node}
                 no_response = {"timeout_seconds": POLICY.no_response_timeout_seconds, "next_node_id": timeout_node}
@@ -250,7 +333,7 @@ class _Expansion:
                     self.add_policy_edge(node.id, timeout_node, "timeout", {"type": "timeout", "seconds": POLICY.no_response_timeout_seconds}, "input-no-response-terminal"),
                 ])
             elif node.capability == "fixed_choice":
-                exhausted_node, exhausted_req = self.add_policy_end("choice-retry-exhausted-terminal", POLICY.retry_exhausted_reason)
+                exhausted_node, exhausted_req = self.add_policy_retry_exhaustion("choice-retry-exhausted-terminal")
                 timeout_node, timeout_req = self.add_policy_end("choice-no-response-terminal", POLICY.no_response_reason)
                 retry_node, retry_req, _ = self.add_policy_retry(
                     originating_choice_id=node.id,
@@ -503,8 +586,18 @@ def validate_expanded_graph(
             ):
                 raise ValueError("P4_CHOICE_RETRY_RETURN_MISSING")
             exhausted = [edge for edge in retry_routes if edge["role"] == "exhausted"]
-            if len(exhausted) != 1 or nodes[exhausted[0]["target_id"]]["type"] != "end":
+            if len(exhausted) != 1 or nodes[exhausted[0]["target_id"]]["type"] != "send_message":
                 raise ValueError("P4_CHOICE_RETRY_EXHAUSTION_MISSING")
+            exhausted_message = nodes[exhausted[0]["target_id"]]
+            exhausted_message_routes = outgoing[exhausted_message["id"]]
+            if (
+                exhausted_message["copy"] != POLICY.retry_exhausted_message
+                or exhausted_message["locale"] != "en"
+                or len(exhausted_message_routes) != 1
+                or exhausted_message_routes[0]["role"] != "next"
+                or nodes[exhausted_message_routes[0]["target_id"]]["type"] != "end"
+            ):
+                raise ValueError("P4_CHOICE_RETRY_EXHAUSTION_MESSAGE_INVALID")
             if not any(edge["role"] == "default" and edge["target_id"] == retry_node_id for edge in routes):
                 raise ValueError("P4_CHOICE_DEFAULT_ROUTE_MISSING")
             if not any(edge["role"] == "invalid" and edge["target_id"] == retry_node_id for edge in routes):
@@ -516,8 +609,18 @@ def validate_expanded_graph(
             no_response = node.get("no_response") or {}
             if retry.get("max_attempts") != POLICY.retry.max_attempts:
                 raise ValueError("P4_INPUT_RETRY_NOT_BOUNDED")
-            if nodes.get(retry.get("on_exhausted_node_id"), {}).get("type") != "end":
+            exhausted_message = nodes.get(retry.get("on_exhausted_node_id"), {})
+            if exhausted_message.get("type") != "send_message":
                 raise ValueError("P4_INPUT_EXHAUSTION_TERMINAL_MISSING")
+            exhausted_message_routes = outgoing[exhausted_message["id"]]
+            if (
+                exhausted_message.get("copy") != POLICY.retry_exhausted_message
+                or exhausted_message.get("locale") != "en"
+                or len(exhausted_message_routes) != 1
+                or exhausted_message_routes[0]["role"] != "next"
+                or nodes[exhausted_message_routes[0]["target_id"]]["type"] != "end"
+            ):
+                raise ValueError("P4_INPUT_EXHAUSTION_MESSAGE_INVALID")
             if no_response.get("timeout_seconds") != POLICY.no_response_timeout_seconds:
                 raise ValueError("P4_INPUT_TIMEOUT_POLICY_MISMATCH")
             if nodes.get(no_response.get("next_node_id"), {}).get("type") != "end":

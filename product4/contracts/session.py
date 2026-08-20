@@ -164,6 +164,9 @@ class AuthoringSession(BaseModel):
     revisions: list[RevisionRecord] = Field(default_factory=list)
     answer_records: list[AnswerRecord] = Field(default_factory=list)
     flow_trigger_metadata: FlowTriggerMetadata | None = None
+    # Prose-first planning stays outside authored nodes until every required
+    # configuration answer is available and deterministic projection succeeds.
+    atomic_workbench: dict[str, Any] | None = None
     frozen_package: dict[str, Any] | None = None
     frozen_hash: str | None = None
     blocked_error: dict[str, Any] | None = None
